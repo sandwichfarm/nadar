@@ -11,6 +11,18 @@
   const STATIC_NPUB = 'npub1nadarndr8f0fra505suk85xhvgksqer2vnuqsjkvt2tfm7d0wakqhwlpf5'
   const CLEARNET_ADDRESS = 'https://nadar.sandwich.farm'
 
+  // Default preferences
+  const DEFAULT_DISCOVERY_RELAYS = [
+    'wss://relay.nostr.watch',
+    'wss://relaypag.es',
+    'wss://monitorlizard.nostr1.com'
+  ];
+  const DEFAULT_MAX_CONCURRENT_RELAYS = 21;
+
+  // Load preferences from localStorage or use defaults
+  let DISCOVERY_RELAYS = JSON.parse(localStorage.getItem('nadar_discovery_relays') || JSON.stringify(DEFAULT_DISCOVERY_RELAYS));
+  let MAX_CONCURRENT_RELAYS = parseInt(localStorage.getItem('nadar_max_concurrent_relays') || DEFAULT_MAX_CONCURRENT_RELAYS.toString());
+
   type TargetEvent = {
     type: 'nevent' | 'naddr';
     id?: string;  // For nevent
@@ -39,13 +51,22 @@
   const zapLoaded = writable(false);
   let npub = window.location.href.match(/npub1[a-z0-9]{59}/)?.[1];
   let isNsite = npub ? true : false;
+  let showPreferences = false;
+  let discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
 
-  const DISCOVERY_RELAYS = [
-    'wss://relay.nostr.watch',
-    'wss://relaypag.es'
-  ];
+  // Save preferences to localStorage
+  function savePreferences() {
+    localStorage.setItem('nadar_discovery_relays', JSON.stringify(DISCOVERY_RELAYS));
+    localStorage.setItem('nadar_max_concurrent_relays', MAX_CONCURRENT_RELAYS.toString());
+  }
 
-  const MAX_CONCURRENT_RELAYS = 21;
+  // Reset preferences to defaults
+  function resetPreferences() {
+    DISCOVERY_RELAYS = [...DEFAULT_DISCOVERY_RELAYS];
+    MAX_CONCURRENT_RELAYS = DEFAULT_MAX_CONCURRENT_RELAYS;
+    discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
+    savePreferences();
+  }
 
   // Helper function to normalize relay URLs
   function normalizeRelayUrl(url: string): string {
@@ -396,40 +417,118 @@
 </script>
 
 <main class="container mx-auto p-4 relative">
-  <div class="flex items-center gap-4 mb-4">
-    <img src="/nadar.png" class="h-16 w-auto" alt="NADAR 2.0" />
-    <h1 class="text-6xl font-bold">NADAR <small class="opacity-50">2.0</small></h1>
+  <div class="flex flex-col sm:flex-row items-center gap-4 mb-4">
+    <div class="flex items-center gap-4">
+      <img src="/nadar.png" class="h-16 w-auto" alt="NADAR 2.0" />
+      <h1 class="text-6xl font-bold">NADAR <small class="opacity-50">2.0</small></h1>
+    </div>
+
+    {#if zapLoaded}
+      <div class="flex flex-wrap gap-2 sm:ml-auto">
+        <a 
+          href="https://github.com/sandwichfarm/nadar"
+          target="_blank"
+          class="bg-gray-600 text-white px-4 py-2 text-sm">
+          github
+        </a>
+        {#if isNsite}
+        <a 
+          href="{alternateLink}"
+          target="_blank"
+          class="bg-gray-600 text-white px-4 py-2 text-sm">
+          clearnet
+        </a>
+        {:else}
+        <a 
+          href="{alternateLink}"
+          target="_blank"
+          class="bg-purple-600 text-white px-4 py-2 text-sm">
+          nsite
+        </a>
+        {/if}
+        <button
+          class="bg-orange-600 text-white px-4 py-2 text-sm"
+          data-npub="npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx"
+          data-relays="wss://lunchbox.sandwich.farm,wss://nostrue.com,wss://relay.damus.io,wss://relay.nostr.band,wss://relay.primal.net,wss://wheat.happytavern.co">
+          Zap Me ⚡️
+        </button>
+      </div>
+    {/if}
   </div>
 
-  {#if zapLoaded}
-    <div class="absolute top-4 right-4 flex gap-2">
-      <a 
-        href="https://github.com/sandwichfarm/nadar"
-        target="_blank"
-        class="bg-gray-600 text-white px-4 py-2 text-sm">
-        github
-      </a>
-      {#if isNsite}
-      <a 
-        href="{alternateLink}"
-        target="_blank"
-        class="bg-gray-600 text-white px-4 py-2 text-sm">
-        clearnet
-      </a>
-      {:else}
-      <a 
-        href="{alternateLink}"
-        target="_blank"
-        class="bg-purple-600 text-white px-4 py-2 text-sm">
-        nsite
-      </a>
-      {/if}
-      <button
-        class="bg-orange-600 text-white px-4 py-2 text-sm"
-        data-npub="npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx"
-        data-relays="wss://lunchbox.sandwich.farm,wss://nostrue.com,wss://relay.damus.io,wss://relay.nostr.band,wss://relay.primal.net,wss://wheat.happytavern.co">
-        Zap Me ⚡️
-      </button>
+  {#if showPreferences}
+    <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div class="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 relative">
+        <button
+          class="absolute top-2 right-2 text-gray-500 hover:text-gray-700"
+          on:click={() => showPreferences = false}
+        >
+          ✕
+        </button>
+        
+        <h2 class="text-xl font-semibold mb-4">Preferences</h2>
+        
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">
+              NIP-66 Discovery Relays
+            </label>
+            <textarea
+              class="w-full h-24 p-2 border rounded font-mono text-sm"
+              bind:value={discoveryRelaysText}
+              on:change={(e) => {
+                const newRelays = e.currentTarget.value
+                  .split('\n')
+                  .map(r => r.trim())
+                  .filter(r => r);
+                DISCOVERY_RELAYS = newRelays;
+                discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
+                savePreferences();
+              }}
+            />
+            <p class="text-sm text-gray-500 mt-1">One relay URL per line</p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">
+              Max Concurrent Relays
+            </label>
+            <input
+              type="number"
+              min="1"
+              max="100"
+              class="w-full p-2 border rounded"
+              bind:value={MAX_CONCURRENT_RELAYS}
+              on:change={(e) => {
+                MAX_CONCURRENT_RELAYS = parseInt(e.currentTarget.value);
+                savePreferences();
+              }}
+            />
+            <p class="text-sm text-gray-500 mt-1">Number of relays to query simultaneously (1-100)</p>
+          </div>
+
+          <div class="flex justify-end gap-2 mt-6">
+            <button
+              class="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+              on:click={() => {
+                resetPreferences();
+                discoverRelays();
+              }}
+            >
+              Reset to Defaults
+            </button>
+            <button
+              class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600"
+              on:click={() => {
+                showPreferences = false;
+                discoverRelays();
+              }}
+            >
+              Save & Rediscover
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   {/if}
 
@@ -457,7 +556,7 @@
     </p>
   </div>
 
-  <div class="mb-4">
+  <div class="mb-4 relative">
     <input
       type="text"
       placeholder={loading ? "Please wait while relays are being loaded..." : "Enter nevent or naddr"}
@@ -465,6 +564,15 @@
       on:keydown={handleInput}
       disabled={isSearching || loading}
     />
+    <button
+      class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-800"
+      title="Preferences"
+      on:click={() => showPreferences = !showPreferences}>
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" />
+        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+      </svg>
+    </button>
     {#if inputError}
       <p class="text-red-500 text-sm mt-1">{inputError}</p>
     {/if}
