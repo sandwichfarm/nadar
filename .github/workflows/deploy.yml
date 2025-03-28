@@ -3,14 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - 'next'
-    paths:
-      - 'libraries/**'
-      - 'internal/**'
-      - 'scripts/**'
-      - 'package.json'
-      - '.github/workflows/publish-package.yml'
-      - 'apps/gui/**'
+      - 'master'
 
 jobs:
   build:
