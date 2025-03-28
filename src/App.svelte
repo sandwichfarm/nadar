@@ -405,7 +405,7 @@
         NADAR 2.0 is a tool for finding nevents and naddrs on nostr. 
         It discovers relays using <a href="https://github.com/nostr-protocol/nips/blob/master/66.md" class="border-b border-gray-700">NIP-66</a> 
         and searches them to locate user specified events. 
-        2.0 is a rewrite of the <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">original</a>.
+        2.0 was made by <a href="https://njump.me/npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx" target="_blank" class="border-b border-gray-700">sandwich</a> and is a rewrite of the <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">original</a>.
       </p>
     </div>
 
