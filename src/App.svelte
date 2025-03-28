@@ -42,7 +42,7 @@ let theme = localStorage.getItem('nadar_theme') || DEFAULT_THEME;
 let debug = localStorage.getItem('nadar_debug') === 'true' || DEFAULT_DEBUG;
 
 type TargetEvent = {
-  type: 'nevent' | 'naddr';
+  type: 'nevent' | 'naddr' | 'hex';
   id?: string;  // For nevent
   pubkey?: string;
   kind?: number;
@@ -374,7 +374,7 @@ async function findEventOnRelays() {
   debugLog(`Starting search with ${sortedRelays.length} relays in ${totalBatches} batches`);
 
   // Create the appropriate filter based on the type
-  const filter: Filter = targetEvent.type === 'nevent' 
+  const filter: Filter = targetEvent.type === 'nevent' || targetEvent.type === 'hex'
     ? { ids: [targetEvent.id!] }
     : {
         authors: [targetEvent.pubkey!],
@@ -580,10 +580,15 @@ async function findEventOnRelays() {
   }
 }
 
-// Extract nevent/naddr from URL path
+// Extract nevent/naddr/hex from URL path
 function extractSearchFromPath() {
   const path = window.location.pathname.slice(1); // Remove leading slash
   if (path.startsWith('nevent1') || path.startsWith('naddr1')) {
+    return path;
+  }
+  // Check for hex ID in URL path
+  const hexRegex = /^[0-9a-fA-F]{64}$/;
+  if (hexRegex.test(path)) {
     return path;
   }
   return null;
@@ -598,6 +603,35 @@ async function processSearch(value: string) {
   }
 
   inputError = '';
+  
+  // Check if the input is a hex ID (32 bytes / 64 hex characters)
+  const hexRegex = /^[0-9a-fA-F]{64}$/;
+  if (hexRegex.test(value)) {
+    debugLog("Detected hex ID:", value);
+    // Create target event for hex ID
+    targetEvent = {
+      type: 'hex',
+      id: value.toLowerCase(),
+      relays: []
+    };
+    
+    debugLog("Target event set for hex ID:", targetEvent);
+    // Reset search state before starting new search
+    searchCompleted = false;
+    isSearching = false;
+    foundOnRelays.set(new Set());
+    checkedRelays.set(new Set());
+    currentBatch = [];
+    currentBatchIndex = 0;
+    
+    // Force synchronous execution before starting search
+    await new Promise(resolve => setTimeout(resolve, 0));
+    
+    debugLog("Starting search for hex ID...");
+    // Start the search
+    findEventOnRelays();
+    return;
+  }
   
   try {
     debugLog("Decoding NIP-19:", value);
@@ -626,7 +660,7 @@ async function processSearch(value: string) {
       };
     } else {
       debugLog("Invalid type:", decoded.type);
-      inputError = 'Input must be a nevent or naddr';
+      inputError = 'Input must be a nevent, naddr, or hex event ID';
       return;
     }
     
@@ -648,16 +682,17 @@ async function processSearch(value: string) {
     
   } catch (error) {
     debugError('Error in processSearch:', error);
-    inputError = 'Invalid nevent or naddr format';
+    inputError = 'Invalid nevent, naddr, or hex event ID format';
   }
 }
 
+// Update the input handler to handle hex IDs
 function handleInput(event: KeyboardEvent) {
   if (event.key === 'Enter') {
     const input = event.currentTarget as HTMLInputElement;
     const value = input.value.trim();
     processSearch(value);
-    input.value = '';
+    inputValue = value;
   }
 }
 
@@ -1088,7 +1123,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
 
   <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4  rounded-lg p-4">
     <p class="text-gray-700 dark:text-gray-300">
-      Hint: Add a <code>nevent</code> or <code>naddr</code> to the path to automatically initiate a search 
+      Hint: Add a <code>nevent</code>, <code>naddr</code>, or <code>hex event ID</code> to the path to automatically initiate a search 
       <a 
       href="/nevent1qqsyrn5mc5x6wlw624p0qgphpmxzkptd3u47j0quahcm74l0e2cftvqpp4mhxue69uhkummn9ekx7mqpyfmhxue69uhhqatjwpkx2urpvuhx2ue0y5erqur4wfcxcetsv9njuetnqyf8wumn8ghj7ur4wfcxcetsv9njuetnqy0hwumn8ghj7ur4wfcxcetsv9njuetn9acxzcnvdanrw73wvdhk6q3qtfrzlfsyfd9cmgcc229xnpaytcadlqet68ryh453p6k0an0sw4qslpmhr3" 
       target="_blank" 
@@ -1112,13 +1147,14 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
   <div class="mb-4 relative">
     <input
       type="text"
-      placeholder={loading ? "Please wait while relays are being loaded..." : "Enter nevent or naddr"}
+      placeholder={loading ? "Please wait while relays are being loaded..." : "Enter nevent, naddr, or hex event ID"}
       class="p-2 border rounded w-full dark:bg-gray-800 dark:border-gray-700 dark:text-white {inputError ? 'border-red-500' : ''}"
       on:keydown={handleInput}
       disabled={isSearching || loading}
+      value={inputValue}
     />
     <button
-      class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
+      class="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-full backdrop-blur-sm bg-white/70 dark:bg-gray-800/70 text-gray-600 hover:text-gray-800 hover:bg-white/90 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-gray-800/90 transition-all"
       title="Preferences"
       on:click={() => showPreferences = !showPreferences}>
       <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
@@ -1229,10 +1265,12 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
               <span class="font-mono ml-2 text-sm break-all">{targetEvent.pubkey}</span>
             </div>
           {/if}
-          <div>
-            <span class="text-gray-600 dark:text-gray-400">Relays from NIP-19:</span>
-            <span class="ml-2">{targetEvent.relays?.length || 0}</span>
-          </div>
+          {#if targetEvent.type !== 'hex'}
+            <div>
+              <span class="text-gray-600 dark:text-gray-400">Relays from NIP-19:</span>
+              <span class="ml-2">{targetEvent.relays?.length || 0}</span>
+            </div>
+          {/if}
       </div>
     </div>
 
@@ -1300,7 +1338,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
         {#each [...$foundOnRelays].sort() as relay}
           <div class="p-1.5 bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded shadow text-xs font-mono truncate hover:bg-green-100 dark:hover:bg-green-900/50 flex items-center gap-1">
             <span class="w-1.5 h-1.5 rounded-full 
-            {$foundOnRelays.has(relay) && targetEvent.relays?.includes(relay) ? 'bg-green-500' : ''}"></span>
+            {targetEvent && targetEvent.relays && $foundOnRelays.has(relay) && targetEvent.relays.includes(relay) ? 'bg-green-500' : ''}"></span>
             {relay}
           </div>
         {/each}
