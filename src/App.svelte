@@ -30,12 +30,14 @@ const DEFAULT_DISCOVERY_RELAYS = [
 const DEFAULT_MAX_CONCURRENT_RELAYS = 21;
 const DEFAULT_SOUND_ENABLED = false;
 const DEFAULT_TIMEOUT_MS = 10000;
+const DEFAULT_THEME = 'system'; // 'light', 'dark', or 'system'
 
 // Load preferences from localStorage or use defaults
 let DISCOVERY_RELAYS = JSON.parse(localStorage.getItem('nadar_discovery_relays') || JSON.stringify(DEFAULT_DISCOVERY_RELAYS));
 let MAX_CONCURRENT_RELAYS = parseInt(localStorage.getItem('nadar_max_concurrent_relays') || DEFAULT_MAX_CONCURRENT_RELAYS.toString());
 let soundEnabled = localStorage.getItem('nadar_sound_enabled') === 'true' || DEFAULT_SOUND_ENABLED;
 let timeoutMs = parseInt(localStorage.getItem('nadar_timeout_ms') || DEFAULT_TIMEOUT_MS.toString());
+let theme = localStorage.getItem('nadar_theme') || DEFAULT_THEME;
 
 type TargetEvent = {
   type: 'nevent' | 'naddr';
@@ -76,12 +78,39 @@ let pingSound: Tone.Player;
 let clickSound: Tone.Player;
 let pageTurnSound: Tone.Player;
 
+// Theme management
+let systemDarkMode = false;
+
+// Update theme based on system preference
+function updateSystemTheme() {
+  systemDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  updateTheme();
+}
+
+// Update theme based on current preference
+function updateTheme() {
+  const isDark = theme === 'dark' || (theme === 'system' && systemDarkMode);
+  document.documentElement.classList.toggle('dark', isDark);
+}
+
+// Watch for system theme changes
+onMount(() => {
+  const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+  mediaQuery.addEventListener('change', updateSystemTheme);
+  updateSystemTheme();
+  
+  return () => {
+    mediaQuery.removeEventListener('change', updateSystemTheme);
+  };
+});
+
 // Save preferences to localStorage
 function savePreferences() {
   localStorage.setItem('nadar_discovery_relays', JSON.stringify(DISCOVERY_RELAYS));
   localStorage.setItem('nadar_max_concurrent_relays', MAX_CONCURRENT_RELAYS.toString());
   localStorage.setItem('nadar_sound_enabled', soundEnabled.toString());
   localStorage.setItem('nadar_timeout_ms', timeoutMs.toString());
+  localStorage.setItem('nadar_theme', theme);
 }
 
 // Reset preferences to defaults
@@ -90,6 +119,7 @@ function resetPreferences() {
   MAX_CONCURRENT_RELAYS = DEFAULT_MAX_CONCURRENT_RELAYS;
   soundEnabled = DEFAULT_SOUND_ENABLED;
   timeoutMs = DEFAULT_TIMEOUT_MS;
+  theme = DEFAULT_THEME;
   discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
   savePreferences();
 }
@@ -649,7 +679,8 @@ onDestroy(() => {
 $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_PROVIDER}`
 </script>
 
-<main class="container mx-auto p-4 relative">
+<div class="min-h-screen w-full bg-white dark:bg-gray-900">
+<main class="container mx-auto p-4 relative dark:bg-gray-900 dark:text-white min-h-screen">
   <div class="flex flex-col sm:flex-row items-center gap-4 mb-4">
     <div class="flex items-center gap-4">
       <img src="/nadar.png" class="h-16 w-auto" alt="NADAR 2.0" />
@@ -675,6 +706,23 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
           {:else}
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
               <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 9.75L19.5 12m0 0l2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6l4.72-4.72a.75.75 0 011.28.531V19.94a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.506-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+            </svg>
+          {/if}
+        </button>
+        <button
+          class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 text-sm flex items-center gap-2"
+          on:click={() => {
+            theme = theme === 'dark' ? 'light' : 'dark';
+            updateTheme();
+            savePreferences();
+          }}>
+          {#if theme === 'dark' || (theme === 'system' && systemDarkMode)}
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" />
+            </svg>
+          {:else}
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" />
             </svg>
           {/if}
         </button>
@@ -711,19 +759,19 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
 
   {#if showPreferences}
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div class="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 relative">
+      <div class="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-2xl w-full mx-4 relative">
         <button
-          class="absolute top-2 right-2 text-gray-500 hover:text-gray-700"
+          class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
           on:click={() => showPreferences = false}
         >
           ✕
         </button>
         
-        <h2 class="text-xl font-semibold mb-4">Preferences</h2>
+        <h2 class="text-xl font-semibold mb-4 dark:text-white">Preferences</h2>
         
         <div class="space-y-4">
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               NIP-66 Discovery Relays
             </label>
             <textarea
@@ -743,7 +791,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
           </div>
 
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Max Concurrent Relays
             </label>
             <input
@@ -761,7 +809,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
           </div>
 
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Relay Query Timeout (ms)
             </label>
             <input
@@ -797,6 +845,24 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
             </label>
           </div>
 
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Theme
+            </label>
+            <select
+              class="w-full p-2 border rounded bg-white dark:bg-gray-800 dark:border-gray-700 dark:text-white"
+              bind:value={theme}
+              on:change={() => {
+                updateTheme();
+                savePreferences();
+              }}
+            >
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </div>
+
           <div class="flex justify-end gap-2 mt-6">
             <button
               class="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
@@ -823,8 +889,8 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
   {/if}
 
     <!-- about section -->
-    <div class="bg-gray-800/10 mb-4  rounded-lg p-4">
-      <p class="text-gray-700">
+    <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4  rounded-lg p-4">
+      <p class="text-gray-700 dark:text-gray-300">
         NADAR 2.0 is a tool for finding specific notes on nostr. 
         It discovers relays using <a href="https://github.com/nostr-protocol/nips/blob/master/66.md" class="border-b border-gray-700">NIP-66</a> 
         and searches them to locate user specified events. 
@@ -850,7 +916,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
     <input
       type="text"
       placeholder={loading ? "Please wait while relays are being loaded..." : "Enter nevent or naddr"}
-      class="p-2 border rounded w-full {inputError ? 'border-red-500' : ''}"
+      class="p-2 border rounded w-full dark:bg-gray-800 dark:border-gray-700 dark:text-white {inputError ? 'border-red-500' : ''}"
       on:keydown={handleInput}
       disabled={isSearching || loading}
     />
@@ -871,37 +937,37 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
   {#if targetEvent}
     {#if searchCompleted}
       <div class="mb-4">
-        <div class="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+        <div class="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4 mb-4">
           <div class="flex items-center gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-green-600">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-green-600 dark:text-green-400">
               <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <h2 class="text-xl font-semibold text-green-800">Search Complete!</h2>
+            <h2 class="text-xl font-semibold text-green-800 dark:text-green-400">Search Complete!</h2>
           </div>
-          <div class="mt-2 text-green-700">
+          <div class="mt-2 text-green-700 dark:text-green-300">
             Search completed in {searchDuration.toFixed(1)} seconds
           </div>
         </div>
 
         <h2 class="text-xl font-semibold mb-2">Search Results:</h2>
-        <div class="bg-gray-50 rounded-lg p-4 space-y-2">
+        <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 space-y-2">
           <div class="grid grid-cols-2 gap-4">
             <div>
-              <span class="text-gray-600">Total Relays Searched:</span>
+              <span class="text-gray-600 dark:text-gray-400">Total Relays Searched:</span>
               <span class="ml-2 font-semibold">{$checkedRelays.size}</span>
             </div>
             <div>
-              <span class="text-gray-600">Found On:</span>
+              <span class="text-gray-600 dark:text-gray-400">Found On:</span>
               <span class="ml-2 font-semibold">{$foundOnRelays.size} relays</span>
             </div>
             <div>
-              <span class="text-gray-600">Success Rate:</span>
+              <span class="text-gray-600 dark:text-gray-400">Success Rate:</span>
               <span class="ml-2 font-semibold">
                 {($foundOnRelays.size / $checkedRelays.size * 100).toFixed(1)}%
               </span>
             </div>
             <div>
-              <span class="text-gray-600">Time Taken:</span>
+              <span class="text-gray-600 dark:text-gray-400">Time Taken:</span>
               <span class="ml-2 font-semibold">{searchDuration.toFixed(1)}s</span>
             </div>
           </div>
@@ -912,22 +978,22 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
     {#if isSearching}
       <div class="mb-4">
         <h2 class="text-xl font-semibold mb-2">Search Progress:</h2>
-        <div class="bg-gray-50 rounded-lg p-4 space-y-2">
+        <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 space-y-2">
           <div class="grid grid-cols-2 gap-2">
             <div>
-              <span class="text-gray-600">Total Relays:</span>
+              <span class="text-gray-600 dark:text-gray-400">Total Relays:</span>
               <span class="ml-2">{$foundRelays.size}</span>
             </div>
             <div>
-              <span class="text-gray-600">Checked Relays:</span>
+              <span class="text-gray-600 dark:text-gray-400">Checked Relays:</span>
               <span class="ml-2">{$checkedRelays.size}</span>
             </div>
             <div>
-              <span class="text-gray-600">Found On:</span>
+              <span class="text-gray-600 dark:text-gray-400">Found On:</span>
               <span class="ml-2">{$foundOnRelays.size}</span>
             </div>
             <div>
-              <span class="text-gray-600">Remaining:</span>
+              <span class="text-gray-600 dark:text-gray-400">Remaining:</span>
               <span class="ml-2">{$foundRelays.size - $checkedRelays.size}</span>
             </div>
           </div>
@@ -937,17 +1003,17 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
 
     <div class="mb-4">
       <h2 class="text-xl font-semibold mb-2">Search Details:</h2>
-      <div class="bg-gray-50 rounded-lg p-4 space-y-2">
+      <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 space-y-2">
           <div>
-            <span class="text-gray-600">Type:</span>
+            <span class="text-gray-600 dark:text-gray-400">Type:</span>
             <span class="font-mono ml-2">{targetEvent.type}</span>
           </div>
           <div class="flex items-center">
-            <span class="text-gray-600">ID:</span>
+            <span class="text-gray-600 dark:text-gray-400">ID:</span>
             <span class="font-mono ml-2 text-sm break-all flex-1">{targetEvent.id}</span>
             {#if targetEvent.id}
             <button
-              class="ml-2 p-1.5 text-gray-600 hover:text-gray-800 rounded-md hover:bg-gray-100"
+              class="ml-2 p-1.5 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700"
               title="Copy ID"
               on:click={() => {
                 if (targetEvent?.id) {
@@ -962,12 +1028,12 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
           </div>
           {#if targetEvent.pubkey}
             <div>
-              <span class="text-gray-600">Pubkey:</span>
+              <span class="text-gray-600 dark:text-gray-400">Pubkey:</span>
               <span class="font-mono ml-2 text-sm break-all">{targetEvent.pubkey}</span>
             </div>
           {/if}
           <div>
-            <span class="text-gray-600">Relays from NIP-19:</span>
+            <span class="text-gray-600 dark:text-gray-400">Relays from NIP-19:</span>
             <span class="ml-2">{targetEvent.relays?.length || 0}</span>
           </div>
       </div>
@@ -975,7 +1041,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
 
     <div class="flex gap-2 my-4">
       <button
-        class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+        class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
         on:click={togglePause}
         disabled={!isSearching}
       >
@@ -1007,12 +1073,12 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
           </div>
           <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
             {#each currentBatch as relay}
-              <div class="p-1.5 rounded text-xs font-mono truncate hover:bg-gray-100 flex items-center gap-1
+              <div class="p-1.5 rounded text-xs font-mono truncate hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-1
                 {$foundOnRelays.has(relay) 
-                  ? 'bg-green-50 text-green-700' 
+                  ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400' 
                   : $checkedRelays.has(relay) 
-                    ? 'bg-red-50 text-red-700' 
-                    : 'bg-gray-50 text-gray-700'}">
+                    ? 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400' 
+                    : 'bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300'}">
                 <span class="w-1.5 h-1.5 rounded-full 
                   {$foundOnRelays.has(relay) 
                     ? 'bg-green-500' 
@@ -1033,7 +1099,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
       <h2 class="text-xl font-semibold mb-2">Found on {$foundOnRelays.size} relays:</h2>
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
         {#each [...$foundOnRelays].sort() as relay}
-          <div class="p-1.5 bg-green-50 text-green-700 rounded shadow text-xs font-mono truncate hover:bg-green-100 flex items-center gap-1">
+          <div class="p-1.5 bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded shadow text-xs font-mono truncate hover:bg-green-100 dark:hover:bg-green-900/50 flex items-center gap-1">
             <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
             {relay}
           </div>
@@ -1041,10 +1107,10 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
       </div>
 
       <div class="mt-4">
-        <h3 class="text-sm font-semibold text-gray-600 mb-2">Copy relays as...</h3>
+        <h3 class="text-sm font-semibold text-gray-600 dark:text-gray-400 mb-2">Copy relays as...</h3>
         <div class="flex gap-2">
           <button
-            class="px-3 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 text-sm"
+            class="px-3 py-1.5 bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-sm"
             on:click={() => {
               const relays = [...$foundOnRelays].sort();
               navigator.clipboard.writeText(relays.join('\n'));
@@ -1053,7 +1119,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
             Newline list
           </button>
           <button
-            class="px-3 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 text-sm"
+            class="px-3 py-1.5 bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-sm"
             on:click={() => {
               const relays = [...$foundOnRelays].sort();
               navigator.clipboard.writeText(relays.join(', '));
@@ -1062,7 +1128,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
             Comma list
           </button>
           <button
-            class="px-3 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 text-sm"
+            class="px-3 py-1.5 bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-sm"
             on:click={() => {
               const relays = [...$foundOnRelays].sort();
               navigator.clipboard.writeText(JSON.stringify(relays, null, 2));
@@ -1083,10 +1149,19 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
     </div>
   {/if}
 </main>
+</div>
 
 <style>
   main {
     max-width: 800px;
     margin: 0 auto;
+  }
+
+  :global(html), :global(body) {
+    background-color: white;
+  }
+
+  :global(html.dark), :global(body.dark) {
+    background-color: #111827; /* gray-900 */
   }
 </style> 
