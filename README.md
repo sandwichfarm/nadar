@@ -1,6 +1,8 @@
-# NADAR
+# NADAR 2.0
 
 NADAR is a tool for finding nevents and naddrs across the Nostr network. It discovers relays using NIP-66 and searches them to locate specific events.
+
+NADAR 2.0 a complete rewrite by of the original <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">NADAR</a> by <a href="https://njump.me/npub16ema6x3r8x8pe32lwnsll0krqmy79h5vvap8sdd7q5yhy4q2dv6slt6le9" target="_blank" class="border-b border-gray-700">Thorwegian</a>.
 
 ![nadar 2.0 screenshot](.assets/nadar.png)
 
