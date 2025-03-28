@@ -1,0 +1,44 @@
+ame: GH Release and NPM Publish
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'next'
+    paths:
+      - 'libraries/**'
+      - 'internal/**'
+      - 'scripts/**'
+      - 'package.json'
+      - '.github/workflows/publish-package.yml'
+      - 'apps/gui/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Packages
+        run: pnpm build
+
+      - name: Deploy to Bunny
+        uses: R-J-dev/bunny-deploy@v2.0.3 
+        with:
+          access-key: ${{ secrets.BUNNY_API_KEY }}
+          directory-to-upload: "./dist"
+          storage-endpoint: "https://sg.storage.bunnycdn.com"
+          storage-zone-name: "nadar"
+          storage-zone-password: ${{ secrets.BUNNY_STORAGE_ZONE_PASSWORD }}
+          concurrency: "50"
+          enable-delete-action: true
+          enable-purge-pull-zone: true
+          pull-zone-id: "3534584"
+          replication-timeout: "15000"  
