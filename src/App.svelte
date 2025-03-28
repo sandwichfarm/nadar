@@ -402,7 +402,7 @@
     <!-- about section -->
     <div class="bg-gray-800/10 mb-4  rounded-lg p-4">
       <p class="text-gray-700">
-        NADAR 2.0 is a tool for finding nevents and naddrs across the Nostr network. 
+        NADAR 2.0 is a tool for finding nevents and naddrs on nostr. 
         It discovers relays using <a href="https://github.com/nostr-protocol/nips/blob/master/66.md" class="border-b border-gray-700">NIP-66</a> 
         and searches them to locate user specified events. 
         2.0 is a rewrite of the <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">original</a>.
