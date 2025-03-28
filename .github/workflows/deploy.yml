@@ -1,4 +1,4 @@
-ame: GH Release and NPM Publish
+name: GH Release and NPM Publish
 on:
   workflow_dispatch:
   push:
