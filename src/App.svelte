@@ -1330,13 +1330,13 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
     </div>
   {/if}
 
-  {#if loading}
+  <!-- {#if loading}
     <div class="animate-pulse">
       <div class="h-4 bg-gray-200 rounded w-3/4 mb-2"></div>
       <div class="h-4 bg-gray-200 rounded w-1/2"></div>
       <div class="h-4 bg-gray-200 rounded w-5/6"></div>
     </div>
-  {/if}
+  {/if} -->
 </main>
 </div>
 
