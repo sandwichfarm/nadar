@@ -1,5 +1,8 @@
 {
   "relays": [
+    "wss://nostrue.com",
+    "wss://purplepag.es",
+    "wss://user.kindpag.es",
     "wss://relay.damus.io",
     "wss://relay.primal.net",
     "wss://relay.nostr.band",
@@ -17,12 +20,12 @@
     "name": "NADAR 2.0",
     "about": "NADAR 2.0 is a tool for finding specific notes on nostr - https://npub1nadarndr8f0fra505suk85xhvgksqer2vnuqsjkvt2tfm7d0wakqhwlpf5.nsite.lol/",
     "nip05": "nadar@sandwich.farm",
-    "lud16": "sandwich@minibits.com",
+    "lud16": "sandwich@minibits.cash",
     "picture": "https://cdn.hzrd149.com/1d6bc621ab3ee9e757349eb8670b03107b25477a12110297348e9720ae3711c0",
     "website": "https://nadar.sandwich.farm"
   },
   "publishServerList": true,
   "publishRelayList": true,
-  "publishProfile": true,
+  "publishProfile": false,
   "fallback": "./index.html"
 }
