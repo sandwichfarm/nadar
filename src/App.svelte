@@ -1,18 +1,27 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { NostrFetcher } from 'nostr-fetch';
-  import type { Event } from 'nostr-tools';
-  import { SimplePool } from 'nostr-tools';
+  import type { Event, Filter } from 'nostr-tools';
+  import { Relay, SimplePool } from 'nostr-tools';
   import { nip19 } from 'nostr-tools';
-    import { writable, type Writable } from 'svelte/store';
+  import { get, writable, type Writable } from 'svelte/store';
+
+  type TargetEvent = {
+    type: 'nevent' | 'naddr';
+    id?: string;  // For nevent
+    pubkey?: string;
+    kind?: number;
+    identifier?: string;  // For naddr
+    relays?: string[];
+  };
 
   let loading = false;
-  let foundRelays: Writable<Set<string>> = writable(new Set<string>());
+  let foundRelays: Writable<Set<string>> = writable(new Set());
   let totalEvents = 0;
   let startTime: number;
-  let targetEvent: { id: string; pubkey: string } | undefined;
-  let foundOnRelays = new Set<string>();
-  let checkedRelays = new Set<string>();
+  let targetEvent: TargetEvent | undefined;
+  let foundOnRelays = writable(new Set<string>());
+  let checkedRelays = writable(new Set<string>());
   let inputValue = '';
   let currentBatch: string[] = [];
   let currentBatchIndex = 0;
@@ -55,7 +64,6 @@
     const fetcher = NostrFetcher.init();
 
     try {
-      // Use nostr-fetch to get events from the last 24 hours
       const nHoursAgo = (hrs: number): number =>
         Math.floor((Date.now() - hrs * 60 * 60 * 1000) / 1000);
 
@@ -71,9 +79,9 @@
         const url = extractRelayUrl(event);
         if(!url) continue;
         foundRelays.update(relays => {
-          relays.add(url)
+          relays.add(url);
           return relays;
-        })
+        });
       }
     } catch (error) {
       console.error('Error discovering relays:', error);
@@ -85,57 +93,93 @@
   async function findEventOnRelays() {
     if (!targetEvent) return;
     
-    const relays = [...$foundRelays];
-    const pool = new SimplePool();
-    foundOnRelays.clear();
-    checkedRelays.clear();
-    totalBatches = Math.ceil(relays.length / MAX_CONCURRENT_RELAYS);
+    // Sort relays to prioritize those from the NIP-19 encoding
+    const relayArray = [...get(foundRelays)];
+    const sortedRelays = relayArray.sort((a, b) => {
+      // Normalize both the relay URLs from NIP-19 and the found relays for comparison
+      const normalizedA = normalizeRelayUrl(a);
+      const normalizedB = normalizeRelayUrl(b);
+      const normalizedNip19Relays = targetEvent?.relays?.map(normalizeRelayUrl) || [];
+      
+      const aInNip19 = normalizedNip19Relays.includes(normalizedA);
+      const bInNip19 = normalizedNip19Relays.includes(normalizedB);
+      
+      if (aInNip19 && !bInNip19) return -1;
+      if (!aInNip19 && bInNip19) return 1;
+      return 0;
+    });
+
+    foundOnRelays.set(new Set()); 
+    checkedRelays.set(new Set());
+    totalBatches = Math.ceil(sortedRelays.length / MAX_CONCURRENT_RELAYS);
+
+    // Create the appropriate filter based on the type
+    const filter: Filter = targetEvent.type === 'nevent' 
+      ? { ids: [targetEvent.id!] }
+      : {
+          authors: [targetEvent.pubkey!],
+          kinds: [targetEvent.kind!]
+        };
+
+    if(targetEvent?.identifier) {
+      filter['#d'] = [targetEvent.identifier];
+    }
 
     // Process relays in batches of MAX_CONCURRENT_RELAYS
-    for (let i = 0; i < relays.length; i += MAX_CONCURRENT_RELAYS) {
+    for (let i = 0; i < sortedRelays.length; i += MAX_CONCURRENT_RELAYS) {
       currentBatchIndex = Math.floor(i / MAX_CONCURRENT_RELAYS) + 1;
-      currentBatch = relays.slice(i, i + MAX_CONCURRENT_RELAYS);
-      const sub = pool.subscribeMany(
-        currentBatch,
-        [{ ids: [targetEvent.id] }],
-        {
-          onevent(event: Event) {
-            if (event.id === targetEvent?.id) {
-              // Get the relay URL from the subscription
-              const relayUrl = currentBatch.find(relay => {
-                // @ts-ignore - SimplePool has this method but TypeScript doesn't know about it
-                const relayConnection = pool.getRelay(relay);
-                return relayConnection && relayConnection.status === 1;
-              }) || 'unknown';
-              foundOnRelays.add(relayUrl);
-            }
-          },
-          oneose() {
-            // When we receive EOSE, mark all relays in the current batch as checked
-            // unless they've already been marked as found
-            console.log('eose');
-            currentBatch.forEach(relay => {
-              if (!foundOnRelays.has(relay)) {
-                checkedRelays.add(relay);
-              }
-            });
-          }
-        }
-      );
+      currentBatch = sortedRelays.slice(i, i + MAX_CONCURRENT_RELAYS);
+      
+      // Create a promise that resolves when all relays in the batch have sent EOSE
+      const batchPromise = new Promise<void>((resolve) => {
+        let eoseCount = 0;
+        const relays: Relay[] = [];
 
-      // Wait for 8 seconds before moving to next batch (defensive timeout)
-      await new Promise(resolve => setTimeout(resolve, 8000));
-      sub.close();
+        // Create and connect to each relay in the batch
+        currentBatch.forEach(async (relayUrl: string) => {
+          const relay = await Relay.connect(relayUrl);
+          relays.push(relay);
+
+          const sub = relay.subscribe([filter], {
+            onevent() {
+              foundOnRelays.update(relays => {
+                relays.add(relayUrl);
+                return relays;
+              });
+            },
+            oneose() {
+              eoseCount++;
+              if (eoseCount === currentBatch.length) {
+                resolve();
+              }
+            }
+          });
+
+          // Set a timeout to close the subscription after 8 seconds
+          setTimeout(() => {
+            sub.close();
+            eoseCount++;
+            if (eoseCount === currentBatch.length) {
+              resolve();
+            }
+          }, 8000);
+        });
+      });
+
+      // Wait for all relays in the batch to complete
+      await batchPromise;
       
       // Mark any remaining unchecked relays in this batch as checked
       currentBatch.forEach(relay => {
-        if (!foundOnRelays.has(relay) && !checkedRelays.has(relay)) {
-          checkedRelays.add(relay);
+        if (!$foundOnRelays.has(relay) && !$checkedRelays.has(relay)) {
+          checkedRelays.update(relays => {
+            relays.add(relay);
+            return relays;
+          });
         }
       });
     }
 
-    pool.close(relays);
     currentBatch = [];
     currentBatchIndex = 0;
   }
@@ -150,20 +194,23 @@
         // Try to decode as nevent or naddr
         const decoded = nip19.decode(value);
         if (decoded.type === 'nevent') {
-          const data = decoded.data as { id: string; pubkey?: string };
+          const data = decoded.data as { id: string; pubkey?: string; relays?: string[] };
           targetEvent = {
+            type: 'nevent',
             id: data.id,
-            pubkey: data.pubkey || ''
+            pubkey: data.pubkey,
+            relays: data.relays?.map(normalizeRelayUrl) || []
           };
         } else if (decoded.type === 'naddr') {
-          const data = decoded.data as { identifier: string; pubkey?: string };
+          const data = decoded.data as { identifier: string; pubkey: string; kind: number; relays?: string[] };
           targetEvent = {
-            id: data.identifier,
-            pubkey: data.pubkey || ''
+            type: 'naddr',
+            identifier: data.identifier,
+            pubkey: data.pubkey,
+            kind: data.kind,
+            relays: data.relays?.map(normalizeRelayUrl) || []
           };
         }
-
-        console.log(targetEvent);
         
         if (targetEvent) {
           findEventOnRelays();
@@ -182,7 +229,7 @@
 </script>
 
 <main class="container mx-auto p-4">
-  <h1 class="text-2xl font-bold mb-4">Nostr Relay Discovery</h1>
+  <h1 class="text-6xl font-bold mb-4">NADAR <small class="opacity-50">2.0</small></h1>
   
   <div class="mb-4">
     <p class="text-gray-600">
@@ -207,6 +254,56 @@
 
   {#if targetEvent}
     <div class="mb-4">
+      <h2 class="text-xl font-semibold mb-2">Search Details:</h2>
+      <div class="bg-gray-50 rounded-lg p-4 space-y-2">
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <span class="text-gray-600">Type:</span>
+            <span class="font-mono ml-2">{targetEvent.pubkey ? 'nevent' : 'naddr'}</span>
+          </div>
+          <div>
+            <span class="text-gray-600">ID:</span>
+            <span class="font-mono ml-2 text-sm break-all">{targetEvent.id}</span>
+          </div>
+          {#if targetEvent.pubkey}
+            <div>
+              <span class="text-gray-600">Pubkey:</span>
+              <span class="font-mono ml-2 text-sm break-all">{targetEvent.pubkey}</span>
+            </div>
+          {/if}
+          <div>
+            <span class="text-gray-600">Relays from NIP-19:</span>
+            <span class="ml-2">{targetEvent.relays?.length || 0}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mb-4">
+      <h2 class="text-xl font-semibold mb-2">Search Progress:</h2>
+      <div class="bg-gray-50 rounded-lg p-4 space-y-2">
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <span class="text-gray-600">Total Relays:</span>
+            <span class="ml-2">{$foundRelays.size}</span>
+          </div>
+          <div>
+            <span class="text-gray-600">Checked Relays:</span>
+            <span class="ml-2">{$checkedRelays.size}</span>
+          </div>
+          <div>
+            <span class="text-gray-600">Found On:</span>
+            <span class="ml-2">{$foundOnRelays.size}</span>
+          </div>
+          <div>
+            <span class="text-gray-600">Remaining:</span>
+            <span class="ml-2">{$foundRelays.size - $checkedRelays.size}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="mb-4">
       <h2 class="text-xl font-semibold mb-2">Searching for event:</h2>
       <p class="font-mono text-sm">{targetEvent.id}</p>
       
@@ -224,15 +321,15 @@
           <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
             {#each currentBatch as relay}
               <div class="p-1.5 rounded text-xs font-mono truncate hover:bg-gray-100 flex items-center gap-1
-                {foundOnRelays.has(relay) 
+                {$foundOnRelays.has(relay) 
                   ? 'bg-green-50 text-green-700' 
-                  : checkedRelays.has(relay) 
+                  : $checkedRelays.has(relay) 
                     ? 'bg-red-50 text-red-700' 
                     : 'bg-gray-50 text-gray-700'}">
                 <span class="w-1.5 h-1.5 rounded-full 
-                  {foundOnRelays.has(relay) 
+                  {$foundOnRelays.has(relay) 
                     ? 'bg-green-500' 
-                    : checkedRelays.has(relay) 
+                    : $checkedRelays.has(relay) 
                       ? 'bg-red-500' 
                       : 'bg-gray-400'}"></span>
                 {relay}
@@ -244,11 +341,11 @@
     </div>
   {/if}
 
-  {#if foundOnRelays.size > 0}
+  {#if $foundOnRelays.size > 0}
     <div class="mb-4">
-      <h2 class="text-xl font-semibold mb-2">Found on {foundOnRelays.size} relays:</h2>
+      <h2 class="text-xl font-semibold mb-2">Found on {$foundOnRelays.size} relays:</h2>
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
-        {#each [...foundOnRelays].sort() as relay}
+        {#each [...$foundOnRelays].sort() as relay}
           <div class="p-1.5 bg-green-50 text-green-700 rounded shadow text-xs font-mono truncate hover:bg-green-100 flex items-center gap-1">
             <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
             {relay}

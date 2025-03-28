@@ -1,14 +1,13 @@
 # NADAR
 
-NADAR is a tool to check where your Nostr posts are visible across different relays. It checks relays listed as online and reports their status, including latency.
+NADAR is a tool for finding nevents and naddrs across the Nostr network. It discovers relays using NIP-66 and searches them to locate specific events.
 
 ## Features
 
-- Check event visibility across multiple Nostr relays
-- Support for both hex and bech32-encoded event IDs
-- Real-time latency measurements
-- Modern, responsive UI built with Svelte and Tailwind CSS
-- Filter results by relay URL
+- Find nevents and naddrs across the Nostr network
+- Real-time search status with color-coded results
+- Automatic relay discovery via NIP-66
+- Modern UI with Svelte and Tailwind CSS
 
 ## Development
 
