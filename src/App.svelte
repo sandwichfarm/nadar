@@ -5,6 +5,7 @@
   import { Relay, SimplePool } from 'nostr-tools';
   import { nip19 } from 'nostr-tools';
   import { get, writable, type Writable } from 'svelte/store';
+    import type { SubCloser } from 'nostr-tools/abstract-pool';
 
   type TargetEvent = {
     type: 'nevent' | 'naddr';
@@ -26,6 +27,11 @@
   let currentBatch: string[] = [];
   let currentBatchIndex = 0;
   let totalBatches = 0;
+  let isPaused = false;
+  let isSearching = false;
+  let inputError = '';
+  let activeRelays: Relay[] = [];
+  let activeSubscriptions: { close: () => void }[] = [];
 
   const DISCOVERY_RELAYS = [
     'wss://relay.nostr.watch',
@@ -90,8 +96,41 @@
     }
   }
 
+  function cleanupActiveConnections() {
+    activeSubscriptions.forEach(sub => sub.close());
+    activeRelays.forEach(relay => relay.close());
+    activeSubscriptions = [];
+    activeRelays = [];
+  }
+
+  function togglePause() {
+    if (isPaused) {
+      // Resume all active relays
+      activeRelays.forEach(relay => relay.connect());
+    } else {
+      // Pause all active relays
+      activeRelays.forEach(relay => relay.close());
+    }
+    isPaused = !isPaused;
+  }
+
+  function restartSearch() {
+    cleanupActiveConnections();
+    foundOnRelays.set(new Set());
+    checkedRelays.set(new Set());
+    currentBatch = [];
+    currentBatchIndex = 0;
+    isPaused = false;
+    isSearching = false;
+    targetEvent = undefined;
+    inputError = '';
+  }
+
   async function findEventOnRelays() {
     if (!targetEvent) return;
+    
+    isSearching = true;
+    isPaused = false;
     
     // Sort relays to prioritize those from the NIP-19 encoding
     const relayArray = [...get(foundRelays)];
@@ -127,42 +166,66 @@
 
     // Process relays in batches of MAX_CONCURRENT_RELAYS
     for (let i = 0; i < sortedRelays.length; i += MAX_CONCURRENT_RELAYS) {
+      if (isPaused) {
+        await new Promise(resolve => {
+          const checkPause = setInterval(() => {
+            if (!isPaused) {
+              clearInterval(checkPause);
+              resolve(undefined);
+            }
+          }, 100);
+        });
+      }
+
       currentBatchIndex = Math.floor(i / MAX_CONCURRENT_RELAYS) + 1;
       currentBatch = sortedRelays.slice(i, i + MAX_CONCURRENT_RELAYS);
       
       // Create a promise that resolves when all relays in the batch have sent EOSE
       const batchPromise = new Promise<void>((resolve) => {
         let eoseCount = 0;
-        const relays: Relay[] = [];
 
         // Create and connect to each relay in the batch
         currentBatch.forEach(async (relayUrl: string) => {
-          const relay = await Relay.connect(relayUrl);
-          relays.push(relay);
+          try {
+            const relay = await Relay.connect(relayUrl);
+            
+            let timeout: ReturnType<typeof setTimeout>;
+            let sub: SubCloser
 
-          const sub = relay.subscribe([filter], {
-            onevent() {
-              foundOnRelays.update(relays => {
-                relays.add(relayUrl);
-                return relays;
-              });
-            },
-            oneose() {
+            activeRelays.push(relay);
+
+            const finish = () => {
+              sub.close();
+              relay.close();
               eoseCount++;
+              
               if (eoseCount === currentBatch.length) {
                 resolve();
               }
             }
-          });
+            
+            sub = relay.subscribe([filter], {
+              onevent(event: Event) {
+                foundOnRelays.update(relays => {
+                  relays.add(relayUrl);
+                  return relays;
+                });
+              },
+              oneose() {
+                clearTimeout(timeout);
+                finish();
+              }
+            });
+            activeSubscriptions.push(sub);
 
-          // Set a timeout to close the subscription after 8 seconds
-          setTimeout(() => {
-            sub.close();
+            // Set a timeout to close the subscription and relay after 8 seconds
+            timeout = setTimeout(finish, 8000);
+          } catch (error) {
             eoseCount++;
             if (eoseCount === currentBatch.length) {
               resolve();
             }
-          }, 8000);
+          }
         });
       });
 
@@ -182,6 +245,7 @@
 
     currentBatch = [];
     currentBatchIndex = 0;
+    isSearching = false;
   }
 
   function handleInput(event: KeyboardEvent) {
@@ -189,6 +253,15 @@
       const input = event.currentTarget as HTMLInputElement;
       const value = input.value.trim();
       if (!value) return;
+
+      inputError = '';
+      
+      // Check if it's a nevent or naddr
+      if (!value.startsWith('nevent1') && !value.startsWith('naddr1')) {
+        inputError = 'Input must be a nevent or naddr';
+        input.value = '';
+        return;
+      }
 
       try {
         // Try to decode as nevent or naddr
@@ -216,6 +289,7 @@
           findEventOnRelays();
         }
       } catch (error) {
+        inputError = 'Invalid nevent or naddr format';
         console.error('Error decoding NIP-19:', error);
       }
       
@@ -247,9 +321,13 @@
     <input
       type="text"
       placeholder="Enter nevent or naddr"
-      class="p-2 border rounded w-full"
+      class="p-2 border rounded w-full {inputError ? 'border-red-500' : ''}"
       on:keydown={handleInput}
+      disabled={isSearching}
     />
+    {#if inputError}
+      <p class="text-red-500 text-sm mt-1">{inputError}</p>
+    {/if}
   </div>
 
   {#if targetEvent}
@@ -259,7 +337,7 @@
         <div class="grid grid-cols-2 gap-2">
           <div>
             <span class="text-gray-600">Type:</span>
-            <span class="font-mono ml-2">{targetEvent.pubkey ? 'nevent' : 'naddr'}</span>
+            <span class="font-mono ml-2">{targetEvent.type}</span>
           </div>
           <div>
             <span class="text-gray-600">ID:</span>
@@ -338,6 +416,23 @@
           </div>
         </div>
       {/if}
+
+      <div class="flex gap-2 mt-4">
+        <button
+          class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+          on:click={togglePause}
+          disabled={!isSearching}
+        >
+          {isPaused ? 'Resume' : 'Pause'}
+        </button>
+        <button
+          class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 disabled:opacity-50"
+          on:click={restartSearch}
+          disabled={!isSearching}
+        >
+          Restart
+        </button>
+      </div>
     </div>
   {/if}
 
