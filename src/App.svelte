@@ -177,6 +177,20 @@ async function discoverRelays() {
     console.error('Error discovering relays:', error);
   } finally {
     loading = false;
+    // Ensure we have at least some relays even if discovery fails
+    foundRelays.update(relays => {
+      if (relays.size === 0) {
+        // Add some fallback relays if discovery fails completely
+        const fallbackRelays = [
+          'wss://relay.damus.io',
+          'wss://relay.nostr.band',
+          'wss://nos.lol',
+          'wss://relay.nostr.info'
+        ];
+        fallbackRelays.forEach(relay => relays.add(relay));
+      }
+      return relays;
+    });
   }
 }
 
@@ -249,8 +263,49 @@ async function restartSearch() {
   await cleanupActiveConnections();
 }
 
+async function showConfetti() {
+  const canvas = document.createElement('canvas');
+  canvas.style.position = 'fixed';
+  canvas.style.top = '0';
+  canvas.style.left = '0';
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+  canvas.style.pointerEvents = 'none';
+  canvas.style.zIndex = '9999';
+  document.body.appendChild(canvas);
+
+  const myConfetti = confetti.create(canvas, {
+    resize: true,
+    useWorker: true
+  });
+
+  // Fire confetti from the input field position
+  const input = document.querySelector('input[type="text"]');
+  if (input) {
+    const rect = input.getBoundingClientRect();
+    const x = (rect.left + rect.right) / 2 / window.innerWidth;
+    const y = rect.bottom / window.innerHeight;
+
+    myConfetti({
+      particleCount: 100,
+      spread: 70,
+      origin: { x, y }
+    });
+
+    // Remove canvas after animation
+    setTimeout(() => {
+      canvas.remove();
+    }, 5000);
+  }
+}
+
 async function findEventOnRelays() {
   if (!targetEvent) return;
+  
+  // If already searching, stop the current search first
+  if (isSearching) {
+    await restartSearch();
+  }
   
   // Clean up any existing connections first
   await cleanupActiveConnections();
@@ -266,6 +321,15 @@ async function findEventOnRelays() {
 
   // Sort relays to prioritize those from the NIP-19 encoding
   const relayArray = [...get(foundRelays)];
+  
+  // Verify we have relays to search
+  if (relayArray.length === 0) {
+    console.error("No relays available to search");
+    inputError = "No relays available. Please wait for relay discovery to complete.";
+    isSearching = false;
+    return;
+  }
+  
   const sortedRelays = relayArray.sort((a, b) => {
     const normalizedA = normalizeRelayUrl(a);
     const normalizedB = normalizeRelayUrl(b);
@@ -279,14 +343,17 @@ async function findEventOnRelays() {
     return 0;
   });
 
+  // Double-check again after sorting
   if (sortedRelays.length === 0) {
     isSearching = false;
     searchCompleted = true;
     searchDuration = (Date.now() - searchStartTime) / 1000;
+    inputError = "No relays to search.";
     return;
   }
 
   totalBatches = Math.ceil(sortedRelays.length / MAX_CONCURRENT_RELAYS);
+  console.log(`Starting search with ${sortedRelays.length} relays in ${totalBatches} batches`);
 
   // Create the appropriate filter based on the type
   const filter: Filter = targetEvent.type === 'nevent' 
@@ -300,11 +367,15 @@ async function findEventOnRelays() {
     filter['#d'] = [targetEvent.identifier];
   }
 
+  console.log("Search filter:", filter);
+
   // Process relays in batches of MAX_CONCURRENT_RELAYS
   try {
     let previousBatchIndex = 0;
+    let batchCount = 0;
     
     for (let i = 0; i < sortedRelays.length && isSearching; i += MAX_CONCURRENT_RELAYS) {
+      batchCount++;
       if (isPaused) {
         await new Promise(resolve => {
           const checkPause = setInterval(() => {
@@ -319,6 +390,7 @@ async function findEventOnRelays() {
       if (!isSearching) break;
 
       currentBatchIndex = Math.floor(i / MAX_CONCURRENT_RELAYS) + 1;
+      console.log(`Processing batch ${currentBatchIndex} of ${totalBatches}`);
       
       // Play page turn sound when changing batches
       if (soundEnabled && currentBatchIndex !== previousBatchIndex) {
@@ -327,35 +399,57 @@ async function findEventOnRelays() {
       }
       
       currentBatch = sortedRelays.slice(i, i + MAX_CONCURRENT_RELAYS);
+      console.log(`Current batch has ${currentBatch.length} relays`);
       
       // Track if we've found a relay in this batch
       let foundRelayInCurrentBatch = false;
 
       // Process each relay in the batch with a small delay between connections
       const batchPromises = currentBatch.map(async (relayUrl, index) => {
-        if (!isSearching) return;
+        if (!isSearching) return null;
 
-        // Add a small delay between connection attempts
+        // Add a small delay between connection attempts to avoid overwhelming the browser
         await new Promise(resolve => setTimeout(resolve, index * 50));
+        console.log(`Attempting to connect to relay: ${relayUrl}`);
 
         let relay: Relay | undefined;
         try {
           relay = new Relay(relayUrl);
           activeRelays.push(relay);
           
-          await relay.connect();
+          console.log(`Connecting to relay: ${relayUrl}`);
+          const connectPromise = relay.connect();
+          const connectTimeout = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('Connection timeout')), 5000);
+          });
+          
+          try {
+            await Promise.race([connectPromise, connectTimeout]);
+            console.log(`Connected to relay: ${relayUrl}`);
+          } catch (err) {
+            console.error(`Connection failed to relay ${relayUrl}:`, err);
+            throw err;
+          }
           
           // Set up a timeout for the relay query
           const timeoutPromise = new Promise<null>((resolve) => {
-            setTimeout(() => resolve(null), timeoutMs);
+            setTimeout(() => {
+              console.log(`Timeout reached for relay ${relayUrl}`);
+              resolve(null);
+            }, timeoutMs);
           });
           
           // Create a promise that resolves when we find the event on this relay
           const findPromise = new Promise<boolean>((resolve) => {
-            if (!relay) return resolve(false);
+            if (!relay) {
+              console.log(`Relay object is undefined for ${relayUrl}`);
+              return resolve(false);
+            }
             
+            console.log(`Creating subscription for relay ${relayUrl} with filter:`, filter);
             const sub = relay.subscribe([filter], {
               onevent: (event) => {
+                console.log(`Event found on relay ${relayUrl}:`, event.id);
                 const isFirstFound = !foundRelayInCurrentBatch;
                 
                 foundOnRelays.update(relays => {
@@ -373,6 +467,7 @@ async function findEventOnRelays() {
                 resolve(true);
               },
               oneose: () => {
+                console.log(`EOSE received from relay ${relayUrl}`);
                 sub.close();
                 resolve(false);
               }
@@ -382,15 +477,31 @@ async function findEventOnRelays() {
           });
           
           // Race between finding the event and timing out
+          console.log(`Starting race for relay ${relayUrl}`);
           const found = await Promise.race([findPromise, timeoutPromise]);
+          console.log(`Race completed for relay ${relayUrl}, found: ${!!found}`);
+          
+          // Mark the relay as checked
+          checkedRelays.update(relays => {
+            relays.add(relayUrl);
+            return relays;
+          });
           
           return { relayUrl, success: true, found: !!found };
         } catch (error) {
           console.error(`Error with relay ${relayUrl}:`, error);
+          
+          // Ensure the relay is still marked as checked even if there was an error
+          checkedRelays.update(relays => {
+            relays.add(relayUrl);
+            return relays;
+          });
+          
           return { relayUrl, success: false, found: false };
         } finally {
           if (relay) {
             try {
+              console.log(`Closing relay connection: ${relayUrl}`);
               relay.close();
               const index = activeRelays.indexOf(relay);
               if (index > -1) {
@@ -403,30 +514,24 @@ async function findEventOnRelays() {
         }
       });
 
-      // Wait for all batch promises to complete and update checkedRelays
-      const results = await Promise.all(batchPromises);
+      // Wait for all batch promises to complete
+      console.log(`Waiting for all ${batchPromises.length} promises in batch ${currentBatchIndex} to complete`);
+      const results = await Promise.allSettled(batchPromises);
+      console.log(`Batch ${currentBatchIndex} completed with ${results.length} results`);
       
-      // Only update checkedRelays after all promises in the batch are complete
-      results.forEach(result => {
-        if (result) {
-          checkedRelays.update(relays => {
-            relays.add(result.relayUrl);
-            return relays;
-          });
-        }
-      });
-
       // Add a small delay between batches
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      // Check if we've completed all relays
-      if (get(checkedRelays).size === sortedRelays.length) {
+      // Check if we've completed all relays or if the search was cancelled
+      if (get(checkedRelays).size >= sortedRelays.length || !isSearching) {
+        console.log("Search complete or cancelled");
         break;
       }
     }
 
     // Only complete if we weren't cancelled
     if (isSearching) {
+      console.log("Search completed successfully");
       currentBatch = [];
       currentBatchIndex = 0;
       isSearching = false;
@@ -446,44 +551,86 @@ async function findEventOnRelays() {
       // Show confetti if relays were found
       const foundCount = get(foundOnRelays).size;
       if (foundCount > 0) {
-        const canvas = document.createElement('canvas');
-        canvas.style.position = 'fixed';
-        canvas.style.top = '0';
-        canvas.style.left = '0';
-        canvas.style.width = '100%';
-        canvas.style.height = '100%';
-        canvas.style.pointerEvents = 'none';
-        canvas.style.zIndex = '9999';
-        document.body.appendChild(canvas);
-
-        const myConfetti = confetti.create(canvas, {
-          resize: true,
-          useWorker: true
-        });
-
-        // Fire confetti from the input field position
-        const input = document.querySelector('input[type="text"]');
-        if (input) {
-          const rect = input.getBoundingClientRect();
-          const x = (rect.left + rect.right) / 2 / window.innerWidth;
-          const y = rect.bottom / window.innerHeight;
-
-          myConfetti({
-            particleCount: 100,
-            spread: 70,
-            origin: { x, y }
-          });
-
-          // Remove canvas after animation
-          setTimeout(() => {
-            canvas.remove();
-          }, 5000);
-        }
+        showConfetti();
       }
     }
   } catch (error) {
     console.error('Error in search:', error);
     isSearching = false;
+    searchCompleted = true;
+    searchDuration = (Date.now() - searchStartTime) / 1000;
+  }
+}
+
+// Extract nevent/naddr from URL path
+function extractSearchFromPath() {
+  const path = window.location.pathname.slice(1); // Remove leading slash
+  if (path.startsWith('nevent1') || path.startsWith('naddr1')) {
+    return path;
+  }
+  return null;
+}
+
+// Process the nevent/naddr and start search
+async function processSearch(value: string) {
+  console.log("processSearch called with:", value);
+  if (!value) {
+    console.log("No search value provided");
+    return;
+  }
+
+  inputError = '';
+  
+  try {
+    console.log("Decoding NIP-19:", value);
+    // Try to decode as nevent or naddr
+    const decoded = nip19.decode(value);
+    console.log("Decoded:", decoded);
+    
+    if (decoded.type === 'nevent') {
+      const data = decoded.data as { id: string; pubkey?: string; relays?: string[] };
+      console.log("Decoded as nevent:", data);
+      targetEvent = {
+        type: 'nevent',
+        id: data.id,
+        pubkey: data.pubkey,
+        relays: data.relays?.map(normalizeRelayUrl) || []
+      };
+    } else if (decoded.type === 'naddr') {
+      const data = decoded.data as { identifier: string; pubkey: string; kind: number; relays?: string[] };
+      console.log("Decoded as naddr:", data);
+      targetEvent = {
+        type: 'naddr',
+        identifier: data.identifier,
+        pubkey: data.pubkey,
+        kind: data.kind,
+        relays: data.relays?.map(normalizeRelayUrl) || []
+      };
+    } else {
+      console.log("Invalid type:", decoded.type);
+      inputError = 'Input must be a nevent or naddr';
+      return;
+    }
+    
+    console.log("Target event set:", targetEvent);
+    // Reset search state before starting new search
+    searchCompleted = false;
+    isSearching = false;
+    foundOnRelays.set(new Set());
+    checkedRelays.set(new Set());
+    currentBatch = [];
+    currentBatchIndex = 0;
+    
+    // Force synchronous execution before starting search
+    await new Promise(resolve => setTimeout(resolve, 0));
+    
+    console.log("Starting search now...");
+    // Start the search
+    findEventOnRelays();
+    
+  } catch (error) {
+    console.error('Error in processSearch:', error);
+    inputError = 'Invalid nevent or naddr format';
   }
 }
 
@@ -491,62 +638,52 @@ function handleInput(event: KeyboardEvent) {
   if (event.key === 'Enter') {
     const input = event.currentTarget as HTMLInputElement;
     const value = input.value.trim();
-    if (!value) return;
-
-    inputError = '';
-    
-    // Check if it's a nevent or naddr
-    if (!value.startsWith('nevent1') && !value.startsWith('naddr1')) {
-      inputError = 'Input must be a nevent or naddr';
-      input.value = '';
-      return;
-    }
-
-    try {
-      // Try to decode as nevent or naddr
-      const decoded = nip19.decode(value);
-      if (decoded.type === 'nevent') {
-        const data = decoded.data as { id: string; pubkey?: string; relays?: string[] };
-        targetEvent = {
-          type: 'nevent',
-          id: data.id,
-          pubkey: data.pubkey,
-          relays: data.relays?.map(normalizeRelayUrl) || []
-        };
-      } else if (decoded.type === 'naddr') {
-        const data = decoded.data as { identifier: string; pubkey: string; kind: number; relays?: string[] };
-        targetEvent = {
-          type: 'naddr',
-          identifier: data.identifier,
-          pubkey: data.pubkey,
-          kind: data.kind,
-          relays: data.relays?.map(normalizeRelayUrl) || []
-        };
-      }
-      
-      if (targetEvent) {
-        // Reset search state before starting new search
-        searchCompleted = false;
-        isSearching = false;
-        foundOnRelays.set(new Set());
-        checkedRelays.set(new Set());
-        currentBatch = [];
-        currentBatchIndex = 0;
-        
-        // Start the search
-        findEventOnRelays();
-      }
-    } catch (error) {
-      inputError = 'Invalid nevent or naddr format';
-      console.error('Error decoding NIP-19:', error);
-    }
-    
+    processSearch(value);
     input.value = '';
   }
 }
 
-onMount(() => {
+onMount(async () => {
+  // Start relay discovery
   discoverRelays();
+
+  // Check for direct nevent/naddr in URL
+  const searchValue = extractSearchFromPath();
+  if (searchValue) {
+    // Set the input value
+    inputValue = searchValue;
+    console.log("Search value from URL:", searchValue);
+
+    if (get(foundRelays).size > 0) {
+      // If relays already loaded, search immediately
+      console.log("Relays already loaded, searching immediately");
+      processSearch(searchValue);
+    } else {
+      console.log("Waiting for relays to load before searching");
+      // Wait for relays to be discovered before starting search
+      const checkInterval = 500; // ms
+      const maxAttempts = 120; // 60 seconds max
+      let attempts = 0;
+      
+      const relayCheckInterval = setInterval(() => {
+        attempts++;
+        const relayCount = get(foundRelays).size;
+        console.log(`Relay check attempt ${attempts}: ${relayCount} relays found, loading=${loading}`);
+        
+        if (relayCount > 0 && !loading) {
+          clearInterval(relayCheckInterval);
+          console.log(`Starting search with ${relayCount} relays`);
+          // Process the search only after relays are available
+          setTimeout(() => processSearch(searchValue), 100);
+        } else if (attempts >= maxAttempts) {
+          clearInterval(relayCheckInterval);
+          console.log("Timeout waiting for relays, attempting search anyway");
+          setTimeout(() => processSearch(searchValue), 100);
+        }
+      }, checkInterval);
+    }
+  }
+
   import('https://cdn.jsdelivr.net/npm/nostr-zap@latest' as any).then(() => {
     zapLoaded.set(true);
   });
@@ -892,8 +1029,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
     <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4  rounded-lg p-4">
       <p class="text-gray-700 dark:text-gray-300">
         NADAR 2.0 is a tool for finding specific notes on nostr. 
-        It discovers relays using <a href="https://github.com/nostr-protocol/nips/blob/master/66.md" class="border-b border-gray-700">NIP-66</a> 
-        and searches them to locate user specified events. 
+        It discovers relays using <a href="https://github.com/nostr-protocol/nips/blob/master/66.md" class="border-b border-gray-700">NIP-66</a>.
         2.0 was made by <a href="https://njump.me/npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx" target="_blank" class="border-b border-gray-700">sandwich</a> and is a rewrite of the <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">original</a>.
       </p>
     </div>
