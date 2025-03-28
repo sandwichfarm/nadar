@@ -837,7 +837,11 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
 <main class="container mx-auto p-4 relative dark:bg-gray-900 dark:text-white min-h-screen">
   <div class="flex flex-col sm:flex-row items-center gap-4 mb-4">
     <div class="flex items-center gap-4">
+      {#if isSearching}
       <div class="radar"></div>
+      {:else}
+      <div class="radar-noanimation"></div>
+      {/if}
       <!-- <img src="/nadar.png" class="h-16 w-auto" alt="NADAR 2.0" /> -->
       <h1 class="text-6xl font-bold">NADAR <small class="opacity-50">2.0</small></h1>
     </div>
@@ -904,9 +908,9 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
         {/if}
         <button
           class="bg-orange-600 text-white px-4 py-2 text-sm"
-          data-npub="npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx"
+          data-npub="npub1nadarndr8f0fra505suk85xhvgksqer2vnuqsjkvt2tfm7d0wakqhwlpf5"
           data-relays="wss://lunchbox.sandwich.farm,wss://nostrue.com,wss://relay.damus.io,wss://relay.nostr.band,wss://relay.primal.net,wss://wheat.happytavern.co">
-          Zap Me ⚡️
+          zap ⚡️
         </button>
       </div>
     {/if}

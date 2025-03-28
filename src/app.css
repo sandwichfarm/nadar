@@ -48,3 +48,27 @@
 @keyframes rotate {
   to { transform: rotate(360deg); }
 }
+
+
+.radar-noanimation {
+  position: relative;
+  width: 50px;
+  height: 50px;
+  border: 3px solid #0f0;       /* green radar outline */
+  border-radius: 50%;           /* make it circular */
+  background: 
+    /* Faint green radar rings on black */
+    repeating-radial-gradient(
+      circle at center,
+      transparent 0%,
+      transparent 4%,
+      rgba(0,255,0,0.2) 4.5%,
+      transparent 10%
+    ),
+    /* Subtle green glow in center fading to black */
+    radial-gradient(
+      circle at center,
+      #002400 0%,
+      #000000 80%
+    );
+}
