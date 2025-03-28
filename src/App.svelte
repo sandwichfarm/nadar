@@ -54,6 +54,10 @@
   let showPreferences = false;
   let discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
 
+  let searchCompleted = false;
+  let searchStartTime: number;
+  let searchDuration = 0;
+
   // Save preferences to localStorage
   function savePreferences() {
     localStorage.setItem('nadar_discovery_relays', JSON.stringify(DISCOVERY_RELAYS));
@@ -201,6 +205,8 @@
     
     isSearching = true;
     isPaused = false;
+    searchCompleted = false;
+    searchStartTime = Date.now();
     
     // Sort relays to prioritize those from the NIP-19 encoding
     const relayArray = [...get(foundRelays)];
@@ -350,6 +356,45 @@
     currentBatch = [];
     currentBatchIndex = 0;
     isSearching = false;
+    searchCompleted = true;
+    searchDuration = (Date.now() - searchStartTime) / 1000;
+
+    // Trigger confetti
+    import('canvas-confetti').then((confetti) => {
+      const canvas = document.createElement('canvas');
+      canvas.style.position = 'fixed';
+      canvas.style.top = '0';
+      canvas.style.left = '0';
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
+      canvas.style.pointerEvents = 'none';
+      canvas.style.zIndex = '9999';
+      document.body.appendChild(canvas);
+
+      const myConfetti = confetti.create(canvas, {
+        resize: true,
+        useWorker: true
+      });
+
+      // Fire confetti from the input field position
+      const input = document.querySelector('input[type="text"]');
+      if (input) {
+        const rect = input.getBoundingClientRect();
+        const x = (rect.left + rect.right) / 2 / window.innerWidth;
+        const y = rect.bottom / window.innerHeight;
+
+        myConfetti({
+          particleCount: 100,
+          spread: 70,
+          origin: { x, y }
+        });
+
+        // Remove canvas after animation
+        setTimeout(() => {
+          canvas.remove();
+        }, 5000);
+      }
+    });
   }
 
   function handleInput(event: KeyboardEvent) {
@@ -579,17 +624,96 @@
   </div>
 
   {#if targetEvent}
+    {#if searchCompleted}
+      <div class="mb-4">
+        <div class="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+          <div class="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-green-600">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <h2 class="text-xl font-semibold text-green-800">Search Complete!</h2>
+          </div>
+          <div class="mt-2 text-green-700">
+            Search completed in {searchDuration.toFixed(1)} seconds
+          </div>
+        </div>
+
+        <h2 class="text-xl font-semibold mb-2">Search Results:</h2>
+        <div class="bg-gray-50 rounded-lg p-4 space-y-2">
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <span class="text-gray-600">Total Relays Searched:</span>
+              <span class="ml-2 font-semibold">{$checkedRelays.size}</span>
+            </div>
+            <div>
+              <span class="text-gray-600">Found On:</span>
+              <span class="ml-2 font-semibold">{$foundOnRelays.size} relays</span>
+            </div>
+            <div>
+              <span class="text-gray-600">Success Rate:</span>
+              <span class="ml-2 font-semibold">
+                {($foundOnRelays.size / $checkedRelays.size * 100).toFixed(1)}%
+              </span>
+            </div>
+            <div>
+              <span class="text-gray-600">Time Taken:</span>
+              <span class="ml-2 font-semibold">{searchDuration.toFixed(1)}s</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if isSearching}
+      <div class="mb-4">
+        <h2 class="text-xl font-semibold mb-2">Search Progress:</h2>
+        <div class="bg-gray-50 rounded-lg p-4 space-y-2">
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <span class="text-gray-600">Total Relays:</span>
+              <span class="ml-2">{$foundRelays.size}</span>
+            </div>
+            <div>
+              <span class="text-gray-600">Checked Relays:</span>
+              <span class="ml-2">{$checkedRelays.size}</span>
+            </div>
+            <div>
+              <span class="text-gray-600">Found On:</span>
+              <span class="ml-2">{$foundOnRelays.size}</span>
+            </div>
+            <div>
+              <span class="text-gray-600">Remaining:</span>
+              <span class="ml-2">{$foundRelays.size - $checkedRelays.size}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
+
     <div class="mb-4">
       <h2 class="text-xl font-semibold mb-2">Search Details:</h2>
       <div class="bg-gray-50 rounded-lg p-4 space-y-2">
-        <div class="grid grid-cols-2 gap-2">
           <div>
             <span class="text-gray-600">Type:</span>
             <span class="font-mono ml-2">{targetEvent.type}</span>
           </div>
-          <div>
+          <div class="flex items-center">
             <span class="text-gray-600">ID:</span>
-            <span class="font-mono ml-2 text-sm break-all">{targetEvent.id}</span>
+            <span class="font-mono ml-2 text-sm break-all flex-1">{targetEvent.id}</span>
+            {#if targetEvent.id}
+            <button
+              class="ml-2 p-1.5 text-gray-600 hover:text-gray-800 rounded-md hover:bg-gray-100"
+              title="Copy ID"
+              on:click={() => {
+                if (targetEvent.id) {
+                  navigator.clipboard.writeText(targetEvent.id);
+                }
+              }}>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" />
+              </svg>
+            </button>
+            {/if}
           </div>
           {#if targetEvent.pubkey}
             <div>
@@ -601,31 +725,6 @@
             <span class="text-gray-600">Relays from NIP-19:</span>
             <span class="ml-2">{targetEvent.relays?.length || 0}</span>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="mb-4">
-      <h2 class="text-xl font-semibold mb-2">Search Progress:</h2>
-      <div class="bg-gray-50 rounded-lg p-4 space-y-2">
-        <div class="grid grid-cols-2 gap-2">
-          <div>
-            <span class="text-gray-600">Total Relays:</span>
-            <span class="ml-2">{$foundRelays.size}</span>
-          </div>
-          <div>
-            <span class="text-gray-600">Checked Relays:</span>
-            <span class="ml-2">{$checkedRelays.size}</span>
-          </div>
-          <div>
-            <span class="text-gray-600">Found On:</span>
-            <span class="ml-2">{$foundOnRelays.size}</span>
-          </div>
-          <div>
-            <span class="text-gray-600">Remaining:</span>
-            <span class="ml-2">{$foundRelays.size - $checkedRelays.size}</span>
-          </div>
-        </div>
       </div>
     </div>
 

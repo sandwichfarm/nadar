@@ -29,7 +29,9 @@
     "vitest": "^1.2.2"
   },
   "dependencies": {
+    "@types/canvas-confetti": "1.9.0",
     "bech32": "^2.0.0",
+    "canvas-confetti": "1.9.3",
     "nostr-fetch": "0.17.0",
     "nostr-tools": "^2.1.0"
   }
