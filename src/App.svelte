@@ -775,7 +775,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
               NIP-66 Discovery Relays
             </label>
             <textarea
-              class="w-full h-24 p-2 border rounded font-mono text-sm"
+              class="w-full h-24 p-2 border rounded font-mono text-sm dark:bg-gray-800 dark:border-gray-700 dark:text-white"
               bind:value={discoveryRelaysText}
               on:change={(e) => {
                 const newRelays = e.currentTarget.value
@@ -798,7 +798,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
               type="number"
               min="1"
               max="100"
-              class="w-full p-2 border rounded"
+              class="w-full p-2 border rounded dark:bg-gray-800 dark:border-gray-700 dark:text-white"
               bind:value={MAX_CONCURRENT_RELAYS}
               on:change={(e) => {
                 MAX_CONCURRENT_RELAYS = parseInt(e.currentTarget.value);
@@ -817,7 +817,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
               min="1000"
               max="30000"
               step="1000"
-              class="w-full p-2 border rounded"
+              class="w-full p-2 border rounded dark:bg-gray-800 dark:border-gray-700 dark:text-white"
               bind:value={timeoutMs}
               on:change={(e) => {
                 timeoutMs = parseInt(e.currentTarget.value);
@@ -831,7 +831,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
             <input
               type="checkbox"
               id="soundEnabled"
-              class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+              class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded dark:border-gray-600 dark:bg-gray-700 dark:ring-offset-gray-800"
               bind:checked={soundEnabled}
               on:change={() => {
                 if (soundEnabled) {
@@ -840,7 +840,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
                 savePreferences();
               }}
             />
-            <label for="soundEnabled" class="ml-2 block text-sm text-gray-700">
+            <label for="soundEnabled" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
               Enable Sound Effects
             </label>
           </div>
@@ -865,7 +865,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
 
           <div class="flex justify-end gap-2 mt-6">
             <button
-              class="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+              class="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
               on:click={() => {
                 resetPreferences();
                 discoverRelays();
@@ -874,7 +874,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
               Reset to Defaults
             </button>
             <button
-              class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600"
+              class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700"
               on:click={() => {
                 showPreferences = false;
                 discoverRelays();
@@ -921,7 +921,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
       disabled={isSearching || loading}
     />
     <button
-      class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-800"
+      class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
       title="Preferences"
       on:click={() => showPreferences = !showPreferences}>
       <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
@@ -1039,9 +1039,10 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
       </div>
     </div>
 
+    {#if !searchCompleted}
     <div class="flex gap-2 my-4">
       <button
-        class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
+        class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700"
         on:click={togglePause}
         disabled={!isSearching}
       >
@@ -1055,12 +1056,15 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
         Restart
       </button>
     </div>
+    {/if}
     
     <div class="mb-4">
+      {#if !searchCompleted}
       <h2 class="text-xl font-semibold mb-2">Searching for event:</h2>
       <p class="font-mono text-sm">{targetEvent.id}</p>
+      {/if}
       
-      {#if currentBatch.length > 0}
+      {#if !searchCompleted && currentBatch.length > 0}
         <div class="mt-4">
           <div class="flex items-center gap-2 mb-2">
             <div class="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
