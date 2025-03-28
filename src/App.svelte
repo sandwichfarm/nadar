@@ -1,293 +1,275 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SimplePool, relayInit } from 'nostr-tools';
-  import type { Filter, Event, Sub } from 'nostr-tools';
-  import { bech32 } from 'bech32';
+  import { NostrFetcher } from 'nostr-fetch';
+  import type { Event } from 'nostr-tools';
+  import { SimplePool } from 'nostr-tools';
+  import { nip19 } from 'nostr-tools';
+    import { writable, type Writable } from 'svelte/store';
 
-  interface RelayResult {
-    url: string;
-    latency?: number;
-  }
+  let loading = false;
+  let foundRelays: Writable<Set<string>> = writable(new Set<string>());
+  let totalEvents = 0;
+  let startTime: number;
+  let targetEvent: { id: string; pubkey: string } | undefined;
+  let foundOnRelays = new Set<string>();
+  let checkedRelays = new Set<string>();
+  let inputValue = '';
+  let currentBatch: string[] = [];
+  let currentBatchIndex = 0;
+  let totalBatches = 0;
 
-  interface Results {
-    Found: RelayResult[];
-    Missing: RelayResult[];
-    Unresponsive: RelayResult[];
-    Dead: RelayResult[];
-  }
-
-  let eventInput = '';
-  let statusText = '';
-  let results: Results = {
-    Found: [],
-    Missing: [],
-    Unresponsive: [],
-    Dead: []
-  };
-  let filterText = '';
-  let showResults = false;
-  let discoveredRelays: string[] = [];
-
-  // Known monitor pubkeys that publish NIP-66 events
-  const MONITOR_PUBKEYS = [
-    // Add known monitor pubkeys here
-    // These should be pubkeys that regularly publish 30166 events
-  ];
-
-  // Discovery relays to fetch NIP-66 events from
   const DISCOVERY_RELAYS = [
-    'wss://relaypag.es',
-    'wss://relay.nostr.watch'
+    'wss://relay.nostr.watch',
+    'wss://relaypag.es'
   ];
 
-  function bech32toHex(str: string): string {
-    const words = bech32.decode(str).words;
-    const bytes = bech32.fromWords(words);
-    return bytes.map((byte) => ('0' + (byte & 0xFF).toString(16)).slice(-2)).join("");
-  }
+  const MAX_CONCURRENT_RELAYS = 21;
 
-  function shuffleArray<T>(array: T[]): void {
-    for (let i = array.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      const temp = array[i];
-      array[i] = array[j];
-      array[j] = temp;
+  // Helper function to normalize relay URLs
+  function normalizeRelayUrl(url: string): string {
+    try {
+      // Remove trailing slashes and convert to lowercase
+      return new URL(url).toString(); 
+    } catch {
+      return url;
     }
   }
 
-  async function discoverRelays(): Promise<string[]> {
-    const pool = new SimplePool();
-    const relays = new Set<string>();
-    const now = Math.floor(Date.now() / 1000);
-    const oneDayAgo = now - (24 * 60 * 60);
+  // Helper function to extract relay URLs from NIP-66 events
+  function extractRelayUrl(event: Event): string | undefined {
+    let url = undefined;
+    url = event.tags
+      .find(tag => tag[0] === 'd')?.[1]
+    if(url) {
+      url = normalizeRelayUrl(url); 
+    }
+    return url;
+  }
 
-    // Create filter for 30166 events from the last 24 hours
-    const filter: Filter = {
-      kinds: [30166],
-      since: oneDayAgo
-    };
+  async function discoverRelays() {
+    loading = true;
+    foundRelays.set(new Set());
+    totalEvents = 0;
+    startTime = Date.now();
+
+    const fetcher = NostrFetcher.init();
 
     try {
-      // Subscribe to events from discovery relays
-      const sub = pool.sub(DISCOVERY_RELAYS, [filter]);
-      
-      return new Promise((resolve) => {
-        sub.on('event', (event: Event) => {
-          // Extract relay URL from the 'd' tag
-          const relayTag = event.tags.find((tag: string[]) => tag[0] === 'd');
-          if (relayTag && relayTag[1]) {
-            relays.add(relayTag[1]);
-          }
-        });
+      // Use nostr-fetch to get events from the last 24 hours
+      const nHoursAgo = (hrs: number): number =>
+        Math.floor((Date.now() - hrs * 60 * 60 * 1000) / 1000);
 
-        sub.on('eose', () => {
-          sub.unsub();
-          pool.close(DISCOVERY_RELAYS);
-          resolve(Array.from(relays));
-        });
-      });
+      const eventIter = fetcher.allEventsIterator(
+        DISCOVERY_RELAYS,
+        { kinds: [30166] },
+        { since: nHoursAgo(24) },
+        { skipFilterMatching: true, skipVerification: true }
+      );
+
+      for await (const event of eventIter) {
+        totalEvents++;
+        const url = extractRelayUrl(event);
+        if(!url) continue;
+        foundRelays.update(relays => {
+          relays.add(url)
+          return relays;
+        })
+      }
     } catch (error) {
       console.error('Error discovering relays:', error);
-      return [];
+    } finally {
+      loading = false;
     }
   }
 
-  async function checkRelay(url: string, eventID: string): Promise<[string, { latency?: number }]> {
-    let relay = relayInit(url);
-    let state = "connecting";
-    let timeoutID: number | null = null;
+  async function findEventOnRelays() {
+    if (!targetEvent) return;
+    
+    const relays = [...$foundRelays];
+    const pool = new SimplePool();
+    foundOnRelays.clear();
+    checkedRelays.clear();
+    totalBatches = Math.ceil(relays.length / MAX_CONCURRENT_RELAYS);
 
-    function finish() {
-      state = "finished";
-      if (timeoutID) {
-        clearTimeout(timeoutID);
-        timeoutID = null;
-      }
-      relay.close();
-      relay = null;
-    }
-
-    const timeoutPromise = new Promise<[string, {}]>((resolve) => {
-      timeoutID = window.setTimeout(() => {
-        console.log(`Dropped ${url} (${state === "connecting" ? "dead" : "slow"})`);
-        finish();
-        if (state === "connecting") {
-          resolve(["Dead", {}]);
-        } else {
-          resolve(["Unresponsive", {}]);
-        }
-      }, 15000);
-    });
-
-    relay.on("notice", (notice: string) => console.log(url, "NOTICE:", notice));
-    const checkPromise = relay.connect()
-      .then(() => new Promise<[string, { latency?: number }]>((resolve) => {
-        state = "connected";
-        const queryStart = performance.now();
-        const sub = relay.sub([{ ids: [eventID] }]);
-        sub.on("event", (event: Event) => {
-          state = "found";
-        });
-        sub.on("eose", () => {
-          const latency = Math.round(performance.now() - queryStart);
-          if (state === "found") {
-            finish();
-            resolve(["Found", { latency }]);
-          } else {
-            finish();
-            resolve(["Missing", { latency }]);
+    // Process relays in batches of MAX_CONCURRENT_RELAYS
+    for (let i = 0; i < relays.length; i += MAX_CONCURRENT_RELAYS) {
+      currentBatchIndex = Math.floor(i / MAX_CONCURRENT_RELAYS) + 1;
+      currentBatch = relays.slice(i, i + MAX_CONCURRENT_RELAYS);
+      const sub = pool.subscribeMany(
+        currentBatch,
+        [{ ids: [targetEvent.id] }],
+        {
+          onevent(event: Event) {
+            if (event.id === targetEvent?.id) {
+              // Get the relay URL from the subscription
+              const relayUrl = currentBatch.find(relay => {
+                // @ts-ignore - SimplePool has this method but TypeScript doesn't know about it
+                const relayConnection = pool.getRelay(relay);
+                return relayConnection && relayConnection.status === 1;
+              }) || 'unknown';
+              foundOnRelays.add(relayUrl);
+            }
+          },
+          oneose() {
+            // When we receive EOSE, mark all relays in the current batch as checked
+            // unless they've already been marked as found
+            console.log('eose');
+            currentBatch.forEach(relay => {
+              if (!foundOnRelays.has(relay)) {
+                checkedRelays.add(relay);
+              }
+            });
           }
-        });
-      }))
-      .catch((error: Error) => {
-        if (state !== "finished") {
-          console.log(`Can't connect to ${url}:`, error);
-          finish();
-          return ["Dead", {}];
+        }
+      );
+
+      // Wait for 8 seconds before moving to next batch (defensive timeout)
+      await new Promise(resolve => setTimeout(resolve, 8000));
+      sub.close();
+      
+      // Mark any remaining unchecked relays in this batch as checked
+      currentBatch.forEach(relay => {
+        if (!foundOnRelays.has(relay) && !checkedRelays.has(relay)) {
+          checkedRelays.add(relay);
         }
       });
+    }
 
-    return Promise.race([checkPromise, timeoutPromise]);
+    pool.close(relays);
+    currentBatch = [];
+    currentBatchIndex = 0;
   }
 
-  async function handleCheck() {
-    if (!eventInput) {
-      statusText = "Please enter an event ID";
-      return;
-    }
+  function handleInput(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      const input = event.currentTarget as HTMLInputElement;
+      const value = input.value.trim();
+      if (!value) return;
 
-    statusText = "Discovering relays...";
-    showResults = false;
-    results = {
-      Found: [],
-      Missing: [],
-      Unresponsive: [],
-      Dead: []
-    };
+      try {
+        // Try to decode as nevent or naddr
+        const decoded = nip19.decode(value);
+        if (decoded.type === 'nevent') {
+          const data = decoded.data as { id: string; pubkey?: string };
+          targetEvent = {
+            id: data.id,
+            pubkey: data.pubkey || ''
+          };
+        } else if (decoded.type === 'naddr') {
+          const data = decoded.data as { identifier: string; pubkey?: string };
+          targetEvent = {
+            id: data.identifier,
+            pubkey: data.pubkey || ''
+          };
+        }
 
-    // Discover relays using NIP-66
-    discoveredRelays = await discoverRelays();
-    
-    if (discoveredRelays.length === 0) {
-      statusText = "No relays discovered. Please try again later.";
-      return;
-    }
-
-    statusText = "Checking relays...";
-    let eventID = eventInput;
-    if (eventInput.startsWith('note1')) {
-      eventID = bech32toHex(eventInput);
-    }
-
-    const relayUrls = [...discoveredRelays];
-    shuffleArray(relayUrls);
-
-    const checks = relayUrls.map(url => checkRelay(url, eventID));
-    let checkResults = await Promise.all(checks);
-
-    checkResults.forEach(([status, data], index) => {
-      if (status === "Found") {
-        results.Found.push({ url: relayUrls[index], ...data });
-      } else if (status === "Missing") {
-        results.Missing.push({ url: relayUrls[index], ...data });
-      } else if (status === "Unresponsive") {
-        results.Unresponsive.push({ url: relayUrls[index], ...data });
-      } else if (status === "Dead") {
-        results.Dead.push({ url: relayUrls[index], ...data });
+        console.log(targetEvent);
+        
+        if (targetEvent) {
+          findEventOnRelays();
+        }
+      } catch (error) {
+        console.error('Error decoding NIP-19:', error);
       }
-    });
-
-    showResults = true;
-    statusText = "Check complete!";
+      
+      input.value = '';
+    }
   }
 
-  $: filteredResults = {
-    Found: results.Found.filter(r => r.url.toLowerCase().includes(filterText.toLowerCase())),
-    Missing: results.Missing.filter(r => r.url.toLowerCase().includes(filterText.toLowerCase())),
-    Unresponsive: results.Unresponsive.filter(r => r.url.toLowerCase().includes(filterText.toLowerCase())),
-    Dead: results.Dead.filter(r => r.url.toLowerCase().includes(filterText.toLowerCase()))
-  };
+  onMount(() => {
+    discoverRelays();
+  });
 </script>
 
-<main class="container mx-auto px-4 py-8 max-w-4xl">
-  <h1 class="text-4xl font-bold mb-4 flex items-center gap-2">
-    NADAR
-    <img src="/nadar.png" alt="NADAR Logo" class="h-8 w-8">
-  </h1>
+<main class="container mx-auto p-4">
+  <h1 class="text-2xl font-bold mb-4">Nostr Relay Discovery</h1>
+  
+  <div class="mb-4">
+    <p class="text-gray-600">
+      {#if loading}
+        Searching for relays... 
+      {/if}
+      Found {$foundRelays.size} unique relays from {totalEvents} reports
+      {#if !loading}
+        in {(Date.now() - startTime) / 1000} seconds
+      {/if}
+    </p>
+  </div>
 
-  <p class="mb-6">
-    NADAR can be used to check where your post is visible on Nostr.
-    It checks every relay listed as online on <a href="https://nostr.watch/" target="_blank" class="text-blue-600 hover:underline">nostr.watch</a>.
-    Relays are considered unresponsive or dead if they take longer than 15 seconds to respond.
-    Queries are run from <em>your</em> browser, device and network.
-  </p>
+  <div class="mb-4">
+    <input
+      type="text"
+      placeholder="Enter nevent or naddr"
+      class="p-2 border rounded w-full"
+      on:keydown={handleInput}
+    />
+  </div>
 
-  <form on:submit|preventDefault={handleCheck} class="mb-6">
+  {#if targetEvent}
     <div class="mb-4">
-      <input
-        type="text"
-        bind:value={eventInput}
-        placeholder="Event ID (note ID or hex value)"
-        class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-      />
-    </div>
-    <button
-      type="submit"
-      class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-    >
-      Check
-    </button>
-  </form>
-
-  <p class="mb-4 text-gray-600">{statusText}</p>
-
-  {#if showResults}
-    <div class="space-y-6">
-      <input
-        type="text"
-        bind:value={filterText}
-        placeholder="Filter relays..."
-        class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-      />
-
-      {#each Object.entries(filteredResults) as [category, relays]}
-        {#if relays.length > 0}
-          <div class="bg-white rounded-lg shadow overflow-hidden">
-            <h2 class="text-xl font-semibold p-4 bg-gray-50 border-b">{category}</h2>
-            <div class="divide-y">
-              {#each relays as relay}
-                <div class="p-4 flex justify-between items-center">
-                  <span class="font-mono">{relay.url}</span>
-                  {#if relay.latency}
-                    <span class="text-gray-600">{relay.latency}ms</span>
-                  {/if}
-                </div>
-              {/each}
+      <h2 class="text-xl font-semibold mb-2">Searching for event:</h2>
+      <p class="font-mono text-sm">{targetEvent.id}</p>
+      
+      {#if currentBatch.length > 0}
+        <div class="mt-4">
+          <div class="flex items-center gap-2 mb-2">
+            <div class="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+              <div 
+                class="h-full bg-blue-500 transition-all duration-300"
+                style="width: {(currentBatchIndex / totalBatches) * 100}%"
+              ></div>
             </div>
+            <span class="text-sm text-gray-600">Batch {currentBatchIndex}/{totalBatches}</span>
           </div>
-        {/if}
-      {/each}
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
+            {#each currentBatch as relay}
+              <div class="p-1.5 rounded text-xs font-mono truncate hover:bg-gray-100 flex items-center gap-1
+                {foundOnRelays.has(relay) 
+                  ? 'bg-green-50 text-green-700' 
+                  : checkedRelays.has(relay) 
+                    ? 'bg-red-50 text-red-700' 
+                    : 'bg-gray-50 text-gray-700'}">
+                <span class="w-1.5 h-1.5 rounded-full 
+                  {foundOnRelays.has(relay) 
+                    ? 'bg-green-500' 
+                    : checkedRelays.has(relay) 
+                      ? 'bg-red-500' 
+                      : 'bg-gray-400'}"></span>
+                {relay}
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
 
-  <div class="mt-8 bg-white rounded-lg shadow overflow-hidden">
-    <div class="p-4">
-      <h2 class="text-xl font-semibold mb-2">About the author</h2>
-      <div class="flex gap-4">
-        <img src="/thorwegian.png" alt="Thorwegian" class="w-24 h-24 rounded-lg">
-        <div>
-          <p class="text-gray-600">
-            Born in 1983, Thorwegian has been writing code since the early 1990s.
-            He can be found on <a href="https://berserker.town/@thor" target="_blank" class="text-blue-600 hover:underline">Mastodon</a>.
-          </p>
-        </div>
+  {#if foundOnRelays.size > 0}
+    <div class="mb-4">
+      <h2 class="text-xl font-semibold mb-2">Found on {foundOnRelays.size} relays:</h2>
+      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
+        {#each [...foundOnRelays].sort() as relay}
+          <div class="p-1.5 bg-green-50 text-green-700 rounded shadow text-xs font-mono truncate hover:bg-green-100 flex items-center gap-1">
+            <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+            {relay}
+          </div>
+        {/each}
       </div>
     </div>
-  </div>
+  {/if}
+
+  {#if loading}
+    <div class="animate-pulse">
+      <div class="h-4 bg-gray-200 rounded w-3/4 mb-2"></div>
+      <div class="h-4 bg-gray-200 rounded w-1/2"></div>
+      <div class="h-4 bg-gray-200 rounded w-5/6"></div>
+    </div>
+  {/if}
 </main>
 
 <style>
-  :global(body) {
-    @apply bg-gray-50;
+  main {
+    max-width: 800px;
+    margin: 0 auto;
   }
 </style> 
