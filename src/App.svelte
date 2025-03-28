@@ -388,7 +388,10 @@
 </script>
 
 <main class="container mx-auto p-4 relative">
-  <h1 class="text-6xl font-bold mb-4">NADAR <small class="opacity-50">2.0</small></h1>
+  <div class="flex items-center gap-4 mb-4">
+    <img src="/nadar.png" class="h-16 w-auto" alt="NADAR 2.0" />
+    <h1 class="text-6xl font-bold">NADAR <small class="opacity-50">2.0</small></h1>
+  </div>
 
   {#if zapLoaded}
   <button
