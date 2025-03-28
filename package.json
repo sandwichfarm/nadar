@@ -15,6 +15,7 @@
     "@tailwindcss/forms": "^0.5.7",
     "@testing-library/svelte": "^4.0.0",
     "@tsconfig/svelte": "5.0.4",
+    "@types/canvas-confetti": "1.9.0",
     "@types/node": "^20.11.19",
     "@vitest/coverage-v8": "^1.2.2",
     "autoprefixer": "^10.4.17",
@@ -30,7 +31,9 @@
   },
   "dependencies": {
     "bech32": "^2.0.0",
+    "canvas-confetti": "1.9.3",
     "nostr-fetch": "0.17.0",
-    "nostr-tools": "^2.1.0"
+    "nostr-tools": "^2.1.0",
+    "tone": "15.0.4"
   }
 }
