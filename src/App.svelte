@@ -6,6 +6,8 @@
   import { nip19 } from 'nostr-tools';
   import { get, writable, type Writable } from 'svelte/store';
   import type { SubCloser } from 'nostr-tools/abstract-pool';
+  import * as Tone from 'tone';
+  import confetti from 'canvas-confetti';
 
   const NSITE_PROVIDER = 'nsite.lol'
   const STATIC_NPUB = 'npub1nadarndr8f0fra505suk85xhvgksqer2vnuqsjkvt2tfm7d0wakqhwlpf5'
@@ -57,6 +59,10 @@
   let searchCompleted = false;
   let searchStartTime: number;
   let searchDuration = 0;
+  let soundEnabled = false;
+  let synth: Tone.Synth;
+  let pingSound: Tone.Player;
+  let clickSound: Tone.Player;
 
   // Save preferences to localStorage
   function savePreferences() {
@@ -207,6 +213,11 @@
     isPaused = false;
     searchCompleted = false;
     searchStartTime = Date.now();
+    foundOnRelays.set(new Set()); 
+    checkedRelays.set(new Set());
+
+    // Play initial radar sound
+    await playRadarSound();
     
     // Sort relays to prioritize those from the NIP-19 encoding
     const relayArray = [...get(foundRelays)];
@@ -224,8 +235,6 @@
       return 0;
     });
 
-    foundOnRelays.set(new Set()); 
-    checkedRelays.set(new Set());
     totalBatches = Math.ceil(sortedRelays.length / MAX_CONCURRENT_RELAYS);
 
     // Create the appropriate filter based on the type
@@ -241,160 +250,122 @@
     }
 
     // Process relays in batches of MAX_CONCURRENT_RELAYS
-    for (let i = 0; i < sortedRelays.length; i += MAX_CONCURRENT_RELAYS) {
-      if (isPaused) {
-        await new Promise(resolve => {
-          const checkPause = setInterval(() => {
-            if (!isPaused) {
-              clearInterval(checkPause);
-              resolve(undefined);
-            }
-          }, 100);
-        });
-      }
-
-      currentBatchIndex = Math.floor(i / MAX_CONCURRENT_RELAYS) + 1;
-      currentBatch = sortedRelays.slice(i, i + MAX_CONCURRENT_RELAYS);
-      
-      // Create a promise that resolves when all relays in the batch have sent EOSE
-      const batchPromise = new Promise<void>((resolve) => {
-        let eoseCount = 0;
-        let connectionPromises: Promise<void>[] = [];
-
-        // Create and connect to each relay in the batch
-        for (const relayUrl of currentBatch) {
-          const connectionPromise = (async () => {
-            try {
-              const relay = await Relay.connect(relayUrl);
-              let timeout: ReturnType<typeof setTimeout>;
-
-              activeRelays.push(relay);
-
-              await new Promise<void>((resolveRelay) => {
-                const finish = () => {
-                  clearTimeout(timeout);
-                  if (sub) {
-                    try {
-                      const index = activeSubscriptions.indexOf(sub);
-                      if (index > -1) {
-                        activeSubscriptions.splice(index, 1);
-                      }
-                      sub.close();
-                    } catch (error) {
-                      console.debug('Error closing subscription in finish:', error);
-                    }
-                  }
-                  
-                  try {
-                    relay.close();
-                    const relayIndex = activeRelays.indexOf(relay);
-                    if (relayIndex > -1) {
-                      activeRelays.splice(relayIndex, 1);
-                    }
-                  } catch (error) {
-                    console.debug('Error closing relay in finish:', error);
-                  }
-
-                  eoseCount++;
-                  if (eoseCount === currentBatch.length) {
-                    resolve();
-                  }
-                  resolveRelay();
-                };
-                
-                const sub = relay.subscribe([filter], {
-                  onevent() {
-                    if (!isSearching) return;
-                    foundOnRelays.update(relays => {
-                      relays.add(relayUrl);
-                      return relays;
-                    });
-                  },
-                  oneose() {
-                    finish();
-                  }
-                });
-
-                activeSubscriptions.push(sub);
-
-                // Set a timeout to close the subscription and relay after 8 seconds
-                timeout = setTimeout(finish, 8000);
-              });
-            } catch (error) {
-              console.debug('Error connecting to relay:', error);
-              eoseCount++;
-              if (eoseCount === currentBatch.length) {
-                resolve();
+    try {
+      for (let i = 0; i < sortedRelays.length && isSearching; i += MAX_CONCURRENT_RELAYS) {
+        if (isPaused) {
+          await new Promise(resolve => {
+            const checkPause = setInterval(() => {
+              if (!isPaused) {
+                clearInterval(checkPause);
+                resolve(undefined);
               }
-            }
-          })();
-          
-          connectionPromises.push(connectionPromise);
-        }
-
-        // Wait for all connections to be established or failed
-        Promise.all(connectionPromises).catch(console.debug);
-      });
-
-      // Wait for all relays in the batch to complete
-      await batchPromise;
-      
-      // Mark any remaining unchecked relays in this batch as checked
-      currentBatch.forEach(relay => {
-        if (!$foundOnRelays.has(relay) && !$checkedRelays.has(relay)) {
-          checkedRelays.update(relays => {
-            relays.add(relay);
-            return relays;
+            }, 100);
           });
         }
-      });
 
-      // Small delay between batches to let resources be cleaned up
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
+        if (!isSearching) break; // Check if search was cancelled
 
-    currentBatch = [];
-    currentBatchIndex = 0;
-    isSearching = false;
-    searchCompleted = true;
-    searchDuration = (Date.now() - searchStartTime) / 1000;
+        currentBatchIndex = Math.floor(i / MAX_CONCURRENT_RELAYS) + 1;
+        currentBatch = sortedRelays.slice(i, i + MAX_CONCURRENT_RELAYS);
+        
+        // Play radar sound for each new batch
+        await playRadarSound();
 
-    // Trigger confetti
-    import('canvas-confetti').then((confetti) => {
-      const canvas = document.createElement('canvas');
-      canvas.style.position = 'fixed';
-      canvas.style.top = '0';
-      canvas.style.left = '0';
-      canvas.style.width = '100%';
-      canvas.style.height = '100%';
-      canvas.style.pointerEvents = 'none';
-      canvas.style.zIndex = '9999';
-      document.body.appendChild(canvas);
+        const batchPromises = currentBatch.map(async (relayUrl) => {
+          if (!isSearching) return; // Check if search was cancelled
 
-      const myConfetti = confetti.create(canvas, {
-        resize: true,
-        useWorker: true
-      });
-
-      // Fire confetti from the input field position
-      const input = document.querySelector('input[type="text"]');
-      if (input) {
-        const rect = input.getBoundingClientRect();
-        const x = (rect.left + rect.right) / 2 / window.innerWidth;
-        const y = rect.bottom / window.innerHeight;
-
-        myConfetti({
-          particleCount: 100,
-          spread: 70,
-          origin: { x, y }
+          try {
+            const pool = new SimplePool();
+            const events = await pool.list([relayUrl], [filter]);
+            
+            if (events && events.length > 0) {
+              foundOnRelays.update(relays => {
+                relays.add(relayUrl);
+                return relays;
+              });
+              // Play found sound when a relay returns the event
+              await playFoundSound();
+            }
+            
+            checkedRelays.update(relays => {
+              relays.add(relayUrl);
+              return relays;
+            });
+            
+            await pool.close([relayUrl]);
+          } catch (error) {
+            console.error(`Error with relay ${relayUrl}:`, error);
+            checkedRelays.update(relays => {
+              relays.add(relayUrl);
+              return relays;
+            });
+          }
         });
 
-        // Remove canvas after animation
-        setTimeout(() => {
-          canvas.remove();
-        }, 5000);
+        // Wait for all promises in the batch to complete
+        await Promise.all(batchPromises.filter(p => p !== undefined));
       }
-    });
+
+      // Only complete if we weren't cancelled and all relays have been checked
+      if (isSearching) {
+        const checkedCount = get(checkedRelays).size;
+        if (checkedCount === sortedRelays.length) {
+          currentBatch = [];
+          currentBatchIndex = 0;
+          isSearching = false;
+          searchCompleted = true;
+          searchDuration = (Date.now() - searchStartTime) / 1000;
+
+          // Play success/failure sound based on results
+          const foundCount = get(foundOnRelays).size;
+          if (foundCount > 0) {
+            await playSuccessSound();
+          } else {
+            await playFailureSound();
+          }
+
+          // Trigger confetti only if relays were found
+          if (foundCount > 0) {
+            const canvas = document.createElement('canvas');
+            canvas.style.position = 'fixed';
+            canvas.style.top = '0';
+            canvas.style.left = '0';
+            canvas.style.width = '100%';
+            canvas.style.height = '100%';
+            canvas.style.pointerEvents = 'none';
+            canvas.style.zIndex = '9999';
+            document.body.appendChild(canvas);
+
+            const myConfetti = confetti.create(canvas, {
+              resize: true,
+              useWorker: true
+            });
+
+            // Fire confetti from the input field position
+            const input = document.querySelector('input[type="text"]');
+            if (input) {
+              const rect = input.getBoundingClientRect();
+              const x = (rect.left + rect.right) / 2 / window.innerWidth;
+              const y = rect.bottom / window.innerHeight;
+
+              myConfetti({
+                particleCount: 100,
+                spread: 70,
+                origin: { x, y }
+              });
+
+              // Remove canvas after animation
+              setTimeout(() => {
+                canvas.remove();
+              }, 5000);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error in search:', error);
+      isSearching = false;
+    }
   }
 
   function handleInput(event: KeyboardEvent) {
@@ -453,9 +424,78 @@
     });
   });
 
+  onMount(async () => {
+    // Initialize Tone.js synth for radar sound
+    synth = new Tone.Synth({
+      oscillator: {
+        type: "sine"
+      },
+      envelope: {
+        attack: 0.01,
+        decay: 0.2,
+        sustain: 0,
+        release: 0.2
+      }
+    }).toDestination();
+
+    // Initialize ping sound for relay discovery
+    pingSound = new Tone.Player({
+      url: "https://cdn.freesound.org/previews/242/242856_4284968-lq.mp3",
+      autostart: false,
+      volume: -10
+    }).toDestination();
+
+    // Initialize click sound for relay found
+    clickSound = new Tone.Player({
+      url: "https://cdn.freesound.org/previews/242/242857_4284968-lq.mp3",
+      autostart: false,
+      volume: -15
+    }).toDestination();
+
+    await Tone.loaded();
+  });
+
+  // Sound effect functions
+  async function playRadarSound() {
+    if (!soundEnabled) return;
+    await Tone.start();
+    synth.triggerAttackRelease("G4", "16n");
+    setTimeout(() => synth.triggerAttackRelease("C4", "16n"), 200);
+  }
+
+  async function playFoundSound() {
+    if (!soundEnabled) return;
+    await Tone.start();
+    clickSound.start();
+  }
+
+  async function playSuccessSound() {
+    if (!soundEnabled) return;
+    await Tone.start();
+    const now = Tone.now();
+    synth.triggerAttackRelease("C4", "8n", now);
+    synth.triggerAttackRelease("E4", "8n", now + 0.1);
+    synth.triggerAttackRelease("G4", "8n", now + 0.2);
+    synth.triggerAttackRelease("C5", "4n", now + 0.3);
+  }
+
+  async function playFailureSound() {
+    if (!soundEnabled) return;
+    await Tone.start();
+    const now = Tone.now();
+    synth.triggerAttackRelease("C4", "8n", now);
+    synth.triggerAttackRelease("B3", "8n", now + 0.1);
+    synth.triggerAttackRelease("Bb3", "8n", now + 0.2);
+    synth.triggerAttackRelease("A3", "4n", now + 0.3);
+  }
+
+  // Clean up function
   onDestroy(() => {
     zapLoaded.set(false);
     (window as any).nostrZap = undefined;
+    if (synth) synth.dispose();
+    if (pingSound) pingSound.dispose();
+    if (clickSound) clickSound.dispose();
   });
 
   $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_PROVIDER}`
@@ -470,6 +510,25 @@
 
     {#if zapLoaded}
       <div class="flex flex-wrap gap-2 sm:ml-auto">
+        <button
+          class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 text-sm flex items-center gap-2"
+          on:click={() => {
+            soundEnabled = !soundEnabled;
+            if (soundEnabled) {
+              // Initialize audio context with a user gesture
+              Tone.start();
+            }
+          }}>
+          {#if soundEnabled}
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+            </svg>
+          {:else}
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 9.75L19.5 12m0 0l2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6l4.72-4.72a.75.75 0 011.28.531V19.94a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.506-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+            </svg>
+          {/if}
+        </button>
         <a 
           href="https://github.com/sandwichfarm/nadar"
           target="_blank"
