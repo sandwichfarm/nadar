@@ -31,7 +31,7 @@
   let isSearching = false;
   let inputError = '';
   let activeRelays: Relay[] = [];
-  let activeSubscriptions: { close: () => void }[] = [];
+  let activeSubscriptions: SubCloser[] = [];
 
   const DISCOVERY_RELAYS = [
     'wss://relay.nostr.watch',
@@ -96,11 +96,21 @@
     }
   }
 
-  function cleanupActiveConnections() {
-    activeSubscriptions.forEach(sub => sub.close());
-    activeRelays.forEach(relay => relay.close());
+  async function cleanupActiveConnections() {
+    // First close all subscriptions
+    for (const sub of activeSubscriptions) {
+      sub.close();
+    }
     activeSubscriptions = [];
+
+    // Then close all relay connections
+    for (const relay of activeRelays) {
+      relay.close();
+    }
     activeRelays = [];
+
+    // Wait a tick to ensure all cleanup is processed
+    await new Promise(resolve => setTimeout(resolve, 0));
   }
 
   function togglePause() {
@@ -114,16 +124,21 @@
     isPaused = !isPaused;
   }
 
-  function restartSearch() {
-    cleanupActiveConnections();
+  async function restartSearch() {
+    // First stop the search
+    isSearching = false;
+    isPaused = false;
+
+    // Reset state before cleanup to prevent any new events from being processed
     foundOnRelays.set(new Set());
     checkedRelays.set(new Set());
-    currentBatch = [];
-    currentBatchIndex = 0;
-    isPaused = false;
-    isSearching = false;
     targetEvent = undefined;
     inputError = '';
+    currentBatch = [];
+    currentBatchIndex = 0;
+
+    // Then cleanup connections
+    await cleanupActiveConnections();
   }
 
   async function findEventOnRelays() {
@@ -188,24 +203,33 @@
         currentBatch.forEach(async (relayUrl: string) => {
           try {
             const relay = await Relay.connect(relayUrl);
-            
             let timeout: ReturnType<typeof setTimeout>;
-            let sub: SubCloser
 
             activeRelays.push(relay);
 
             const finish = () => {
-              sub.close();
+              if (sub) {
+                const index = activeSubscriptions.indexOf(sub);
+                if (index > -1) {
+                  activeSubscriptions.splice(index, 1);
+                }
+                sub.close();
+              }
               relay.close();
+              const relayIndex = activeRelays.indexOf(relay);
+              if (relayIndex > -1) {
+                activeRelays.splice(relayIndex, 1);
+              }
               eoseCount++;
               
               if (eoseCount === currentBatch.length) {
                 resolve();
               }
-            }
+            };
             
-            sub = relay.subscribe([filter], {
+            const sub = relay.subscribe([filter], {
               onevent(event: Event) {
+                if (!isSearching) return; // Don't process events if we're not searching
                 foundOnRelays.update(relays => {
                   relays.add(relayUrl);
                   return relays;
@@ -320,10 +344,10 @@
   <div class="mb-4">
     <input
       type="text"
-      placeholder="Enter nevent or naddr"
+      placeholder={loading ? "Please wait while relays are being loaded..." : "Enter nevent or naddr"}
       class="p-2 border rounded w-full {inputError ? 'border-red-500' : ''}"
       on:keydown={handleInput}
-      disabled={isSearching}
+      disabled={isSearching || loading}
     />
     {#if inputError}
       <p class="text-red-500 text-sm mt-1">{inputError}</p>
@@ -380,6 +404,23 @@
         </div>
       </div>
     </div>
+
+    <div class="flex gap-2 my-4">
+      <button
+        class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+        on:click={togglePause}
+        disabled={!isSearching}
+      >
+        {isPaused ? 'Resume' : 'Pause'}
+      </button>
+      <button
+        class="px-4 py-2 text-sm bg-red-500 text-white rounded hover:bg-red-600 disabled:opacity-50"
+        on:click={restartSearch}
+        disabled={!isSearching}
+      >
+        Restart
+      </button>
+    </div>
     
     <div class="mb-4">
       <h2 class="text-xl font-semibold mb-2">Searching for event:</h2>
@@ -416,23 +457,6 @@
           </div>
         </div>
       {/if}
-
-      <div class="flex gap-2 mt-4">
-        <button
-          class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
-          on:click={togglePause}
-          disabled={!isSearching}
-        >
-          {isPaused ? 'Resume' : 'Pause'}
-        </button>
-        <button
-          class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 disabled:opacity-50"
-          on:click={restartSearch}
-          disabled={!isSearching}
-        >
-          Restart
-        </button>
-      </div>
     </div>
   {/if}
 
@@ -446,6 +470,39 @@
             {relay}
           </div>
         {/each}
+      </div>
+
+      <div class="mt-4">
+        <h3 class="text-sm font-semibold text-gray-600 mb-2">Copy relays as...</h3>
+        <div class="flex gap-2">
+          <button
+            class="px-3 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 text-sm"
+            on:click={() => {
+              const relays = [...$foundOnRelays].sort();
+              navigator.clipboard.writeText(relays.join('\n'));
+            }}
+          >
+            Newline list
+          </button>
+          <button
+            class="px-3 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 text-sm"
+            on:click={() => {
+              const relays = [...$foundOnRelays].sort();
+              navigator.clipboard.writeText(relays.join(', '));
+            }}
+          >
+            Comma list
+          </button>
+          <button
+            class="px-3 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 text-sm"
+            on:click={() => {
+              const relays = [...$foundOnRelays].sort();
+              navigator.clipboard.writeText(JSON.stringify(relays, null, 2));
+            }}
+          >
+            JSON array
+          </button>
+        </div>
       </div>
     </div>
   {/if}
