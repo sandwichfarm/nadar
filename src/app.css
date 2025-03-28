@@ -1,3 +1,50 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities; 
+
+/* Radar screen container */
+.radar {
+  position: relative;
+  width: 50px;               /* adjust size as needed */
+  height: 50px;
+  border: 2px solid #0f0;     /* green radar outline */
+  border-radius: 50%;         /* make it a circle */
+  background: 
+    /* Faint green radar rings on black background */
+    repeating-radial-gradient(circle at center, 
+      transparent 0%,
+      transparent 4%,              /* ring spacing */
+      rgba(0, 255, 0, 0.2) 4.5%,   /* thin ring */
+      transparent 10%               /* gap after ring */
+    ),
+    /* Subtle green glow from center fading to black */
+    radial-gradient(circle at center, 
+      #002400 0%,   /* dark green center glow */
+      #000000 80%   /* black at edges */
+    );
+  /* (The first gradient creates concentric rings; 
+     the second creates an overall greenish glow.) */
+  overflow: hidden;            /* hide overflow (if any) */
+}
+
+/* Sweeping radar beam (pseudo-element) */
+.radar::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0;             /* fill the radar container */
+  width: 100%; height: 100%;
+  border-radius: 50%;          /* match circle shape */
+  /* Conic gradient: mostly transparent, with a green wedge */
+  background: conic-gradient(
+    transparent 90%,                 /* 90% of circle is transparent... */
+    rgba(0, 255, 0, 0.6) 100%        /* ...last 10% is semi-transparent green */
+  );
+  /* The above creates a sweeping "pie slice" of green with a fading tail :contentReference[oaicite:6]{index=6} */
+  transform-origin: 50% 50%;   /* rotate around center */
+  animation: rotate 2s linear infinite;  /* continuous rotation animation */
+}
+
+/* Keyframe animation for 360° rotation */
+@keyframes rotate {
+  to { transform: rotate(360deg); }
+}
