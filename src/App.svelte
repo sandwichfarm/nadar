@@ -99,27 +99,51 @@
   async function cleanupActiveConnections() {
     // First close all subscriptions
     for (const sub of activeSubscriptions) {
-      sub.close();
+      try {
+        sub.close();
+      } catch (error) {
+        console.debug('Error closing subscription:', error);
+      }
     }
     activeSubscriptions = [];
 
     // Then close all relay connections
     for (const relay of activeRelays) {
-      relay.close();
+      try {
+        // Only close if the connection is still open
+        if (relay.status === 1) {
+          relay.close();
+        }
+      } catch (error) {
+        console.debug('Error closing relay:', error);
+      }
     }
     activeRelays = [];
-
-    // Wait a tick to ensure all cleanup is processed
-    await new Promise(resolve => setTimeout(resolve, 0));
   }
 
   function togglePause() {
     if (isPaused) {
       // Resume all active relays
-      activeRelays.forEach(relay => relay.connect());
+      activeRelays.forEach(relay => {
+        try {
+          if (relay.status === 3) { // CLOSED
+            relay.connect();
+          }
+        } catch (error) {
+          console.debug('Error resuming relay:', error);
+        }
+      });
     } else {
       // Pause all active relays
-      activeRelays.forEach(relay => relay.close());
+      activeRelays.forEach(relay => {
+        try {
+          if (relay.status === 1) { // CONNECTED
+            relay.close();
+          }
+        } catch (error) {
+          console.debug('Error pausing relay:', error);
+        }
+      });
     }
     isPaused = !isPaused;
   }
@@ -143,6 +167,9 @@
 
   async function findEventOnRelays() {
     if (!targetEvent) return;
+    
+    // Clean up any existing connections first
+    await cleanupActiveConnections();
     
     isSearching = true;
     isPaused = false;
@@ -205,23 +232,37 @@
             const relay = await Relay.connect(relayUrl);
             let timeout: ReturnType<typeof setTimeout>;
 
-            activeRelays.push(relay);
+            // Only add to active relays if connection was successful
+            if (relay.status === 1) {
+              activeRelays.push(relay);
+            }
 
             const finish = () => {
               if (sub) {
-                const index = activeSubscriptions.indexOf(sub);
-                if (index > -1) {
-                  activeSubscriptions.splice(index, 1);
+                try {
+                  const index = activeSubscriptions.indexOf(sub);
+                  if (index > -1) {
+                    activeSubscriptions.splice(index, 1);
+                  }
+                  sub.close();
+                } catch (error) {
+                  console.debug('Error closing subscription in finish:', error);
                 }
-                sub.close();
               }
-              relay.close();
-              const relayIndex = activeRelays.indexOf(relay);
-              if (relayIndex > -1) {
-                activeRelays.splice(relayIndex, 1);
-              }
-              eoseCount++;
               
+              try {
+                if (relay.status === 1) {
+                  relay.close();
+                }
+                const relayIndex = activeRelays.indexOf(relay);
+                if (relayIndex > -1) {
+                  activeRelays.splice(relayIndex, 1);
+                }
+              } catch (error) {
+                console.debug('Error closing relay in finish:', error);
+              }
+
+              eoseCount++;
               if (eoseCount === currentBatch.length) {
                 resolve();
               }
@@ -229,7 +270,7 @@
             
             const sub = relay.subscribe([filter], {
               onevent(event: Event) {
-                if (!isSearching) return; // Don't process events if we're not searching
+                if (!isSearching) return;
                 foundOnRelays.update(relays => {
                   relays.add(relayUrl);
                   return relays;
@@ -240,11 +281,14 @@
                 finish();
               }
             });
+
+            // Only track subscription if we successfully subscribed
             activeSubscriptions.push(sub);
 
             // Set a timeout to close the subscription and relay after 8 seconds
             timeout = setTimeout(finish, 8000);
           } catch (error) {
+            console.debug('Error connecting to relay:', error);
             eoseCount++;
             if (eoseCount === currentBatch.length) {
               resolve();

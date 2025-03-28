@@ -2,6 +2,8 @@
 
 NADAR is a tool for finding nevents and naddrs across the Nostr network. It discovers relays using NIP-66 and searches them to locate specific events.
 
+![nadar 2.0 screenshot](.assets/nadar.png)
+
 ## Features
 
 - Find nevents and naddrs across the Nostr network
