@@ -31,6 +31,7 @@ const DEFAULT_MAX_CONCURRENT_RELAYS = 21;
 const DEFAULT_SOUND_ENABLED = false;
 const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_THEME = 'system'; // 'light', 'dark', or 'system'
+const DEFAULT_DEBUG = false;
 
 // Load preferences from localStorage or use defaults
 let DISCOVERY_RELAYS = JSON.parse(localStorage.getItem('nadar_discovery_relays') || JSON.stringify(DEFAULT_DISCOVERY_RELAYS));
@@ -38,6 +39,7 @@ let MAX_CONCURRENT_RELAYS = parseInt(localStorage.getItem('nadar_max_concurrent_
 let soundEnabled = localStorage.getItem('nadar_sound_enabled') === 'true' || DEFAULT_SOUND_ENABLED;
 let timeoutMs = parseInt(localStorage.getItem('nadar_timeout_ms') || DEFAULT_TIMEOUT_MS.toString());
 let theme = localStorage.getItem('nadar_theme') || DEFAULT_THEME;
+let debug = localStorage.getItem('nadar_debug') === 'true' || DEFAULT_DEBUG;
 
 type TargetEvent = {
   type: 'nevent' | 'naddr';
@@ -104,6 +106,19 @@ onMount(() => {
   };
 });
 
+// Create a custom debug logger that only logs when debug is enabled
+function debugLog(...args: any[]) {
+  if (debug) {
+    console.log(...args);
+  }
+}
+
+function debugError(...args: any[]) {
+  if (debug) {
+    console.error(...args);
+  }
+}
+
 // Save preferences to localStorage
 function savePreferences() {
   localStorage.setItem('nadar_discovery_relays', JSON.stringify(DISCOVERY_RELAYS));
@@ -111,6 +126,7 @@ function savePreferences() {
   localStorage.setItem('nadar_sound_enabled', soundEnabled.toString());
   localStorage.setItem('nadar_timeout_ms', timeoutMs.toString());
   localStorage.setItem('nadar_theme', theme);
+  localStorage.setItem('nadar_debug', debug.toString());
 }
 
 // Reset preferences to defaults
@@ -120,6 +136,7 @@ function resetPreferences() {
   soundEnabled = DEFAULT_SOUND_ENABLED;
   timeoutMs = DEFAULT_TIMEOUT_MS;
   theme = DEFAULT_THEME;
+  debug = DEFAULT_DEBUG;
   discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
   savePreferences();
 }
@@ -174,7 +191,7 @@ async function discoverRelays() {
       });
     }
   } catch (error) {
-    console.error('Error discovering relays:', error);
+    debugError('Error discovering relays:', error);
   } finally {
     loading = false;
     // Ensure we have at least some relays even if discovery fails
@@ -200,7 +217,7 @@ async function cleanupActiveConnections() {
     try {
       sub.close();
     } catch (error) {
-      console.debug('Error closing subscription:', error);
+      debugLog('Error closing subscription:', error);
     }
   }
   activeSubscriptions = [];
@@ -213,7 +230,7 @@ async function cleanupActiveConnections() {
         relay.close();
       }
     } catch (error) {
-      console.debug('Error closing relay:', error);
+      debugLog('Error closing relay:', error);
     }
   }
   activeRelays = [];
@@ -228,7 +245,7 @@ function togglePause() {
           relay.connect();
         }
       } catch (error) {
-        console.debug('Error resuming relay:', error);
+        debugLog('Error resuming relay:', error);
       }
     });
   } else {
@@ -239,7 +256,7 @@ function togglePause() {
           relay.close();
         }
       } catch (error) {
-        console.debug('Error pausing relay:', error);
+        debugLog('Error pausing relay:', error);
       }
     });
   }
@@ -324,7 +341,7 @@ async function findEventOnRelays() {
   
   // Verify we have relays to search
   if (relayArray.length === 0) {
-    console.error("No relays available to search");
+    debugError("No relays available to search");
     inputError = "No relays available. Please wait for relay discovery to complete.";
     isSearching = false;
     return;
@@ -353,7 +370,7 @@ async function findEventOnRelays() {
   }
 
   totalBatches = Math.ceil(sortedRelays.length / MAX_CONCURRENT_RELAYS);
-  console.log(`Starting search with ${sortedRelays.length} relays in ${totalBatches} batches`);
+  debugLog(`Starting search with ${sortedRelays.length} relays in ${totalBatches} batches`);
 
   // Create the appropriate filter based on the type
   const filter: Filter = targetEvent.type === 'nevent' 
@@ -367,7 +384,7 @@ async function findEventOnRelays() {
     filter['#d'] = [targetEvent.identifier];
   }
 
-  console.log("Search filter:", filter);
+  debugLog("Search filter:", filter);
 
   // Process relays in batches of MAX_CONCURRENT_RELAYS
   try {
@@ -390,7 +407,7 @@ async function findEventOnRelays() {
       if (!isSearching) break;
 
       currentBatchIndex = Math.floor(i / MAX_CONCURRENT_RELAYS) + 1;
-      console.log(`Processing batch ${currentBatchIndex} of ${totalBatches}`);
+      debugLog(`Processing batch ${currentBatchIndex} of ${totalBatches}`);
       
       // Play page turn sound when changing batches
       if (soundEnabled && currentBatchIndex !== previousBatchIndex) {
@@ -399,7 +416,7 @@ async function findEventOnRelays() {
       }
       
       currentBatch = sortedRelays.slice(i, i + MAX_CONCURRENT_RELAYS);
-      console.log(`Current batch has ${currentBatch.length} relays`);
+      debugLog(`Current batch has ${currentBatch.length} relays`);
       
       // Track if we've found a relay in this batch
       let foundRelayInCurrentBatch = false;
@@ -410,14 +427,14 @@ async function findEventOnRelays() {
 
         // Add a small delay between connection attempts to avoid overwhelming the browser
         await new Promise(resolve => setTimeout(resolve, index * 50));
-        console.log(`Attempting to connect to relay: ${relayUrl}`);
+        debugLog(`Attempting to connect to relay: ${relayUrl}`);
 
         let relay: Relay | undefined;
         try {
           relay = new Relay(relayUrl);
           activeRelays.push(relay);
           
-          console.log(`Connecting to relay: ${relayUrl}`);
+          debugLog(`Connecting to relay: ${relayUrl}`);
           const connectPromise = relay.connect();
           const connectTimeout = new Promise((_, reject) => {
             setTimeout(() => reject(new Error('Connection timeout')), 5000);
@@ -425,16 +442,16 @@ async function findEventOnRelays() {
           
           try {
             await Promise.race([connectPromise, connectTimeout]);
-            console.log(`Connected to relay: ${relayUrl}`);
+            debugLog(`Connected to relay: ${relayUrl}`);
           } catch (err) {
-            console.error(`Connection failed to relay ${relayUrl}:`, err);
+            debugError(`Connection failed to relay ${relayUrl}:`, err);
             throw err;
           }
           
           // Set up a timeout for the relay query
           const timeoutPromise = new Promise<null>((resolve) => {
             setTimeout(() => {
-              console.log(`Timeout reached for relay ${relayUrl}`);
+              debugLog(`Timeout reached for relay ${relayUrl}`);
               resolve(null);
             }, timeoutMs);
           });
@@ -442,14 +459,14 @@ async function findEventOnRelays() {
           // Create a promise that resolves when we find the event on this relay
           const findPromise = new Promise<boolean>((resolve) => {
             if (!relay) {
-              console.log(`Relay object is undefined for ${relayUrl}`);
+              debugLog(`Relay object is undefined for ${relayUrl}`);
               return resolve(false);
             }
             
-            console.log(`Creating subscription for relay ${relayUrl} with filter:`, filter);
+            debugLog(`Creating subscription for relay ${relayUrl} with filter:`, filter);
             const sub = relay.subscribe([filter], {
               onevent: (event) => {
-                console.log(`Event found on relay ${relayUrl}:`, event.id);
+                debugLog(`Event found on relay ${relayUrl}:`, event.id);
                 const isFirstFound = !foundRelayInCurrentBatch;
                 
                 foundOnRelays.update(relays => {
@@ -467,7 +484,7 @@ async function findEventOnRelays() {
                 resolve(true);
               },
               oneose: () => {
-                console.log(`EOSE received from relay ${relayUrl}`);
+                debugLog(`EOSE received from relay ${relayUrl}`);
                 sub.close();
                 resolve(false);
               }
@@ -477,9 +494,9 @@ async function findEventOnRelays() {
           });
           
           // Race between finding the event and timing out
-          console.log(`Starting race for relay ${relayUrl}`);
+          debugLog(`Starting race for relay ${relayUrl}`);
           const found = await Promise.race([findPromise, timeoutPromise]);
-          console.log(`Race completed for relay ${relayUrl}, found: ${!!found}`);
+          debugLog(`Race completed for relay ${relayUrl}, found: ${!!found}`);
           
           // Mark the relay as checked
           checkedRelays.update(relays => {
@@ -489,7 +506,7 @@ async function findEventOnRelays() {
           
           return { relayUrl, success: true, found: !!found };
         } catch (error) {
-          console.error(`Error with relay ${relayUrl}:`, error);
+          debugError(`Error with relay ${relayUrl}:`, error);
           
           // Ensure the relay is still marked as checked even if there was an error
           checkedRelays.update(relays => {
@@ -501,37 +518,37 @@ async function findEventOnRelays() {
         } finally {
           if (relay) {
             try {
-              console.log(`Closing relay connection: ${relayUrl}`);
+              debugLog(`Closing relay connection: ${relayUrl}`);
               relay.close();
               const index = activeRelays.indexOf(relay);
               if (index > -1) {
                 activeRelays.splice(index, 1);
               }
             } catch (error) {
-              console.error(`Error closing relay ${relayUrl}:`, error);
+              debugError(`Error closing relay ${relayUrl}:`, error);
             }
           }
         }
       });
 
       // Wait for all batch promises to complete
-      console.log(`Waiting for all ${batchPromises.length} promises in batch ${currentBatchIndex} to complete`);
+      debugLog(`Waiting for all ${batchPromises.length} promises in batch ${currentBatchIndex} to complete`);
       const results = await Promise.allSettled(batchPromises);
-      console.log(`Batch ${currentBatchIndex} completed with ${results.length} results`);
+      debugLog(`Batch ${currentBatchIndex} completed with ${results.length} results`);
       
       // Add a small delay between batches
       await new Promise(resolve => setTimeout(resolve, 100));
 
       // Check if we've completed all relays or if the search was cancelled
       if (get(checkedRelays).size >= sortedRelays.length || !isSearching) {
-        console.log("Search complete or cancelled");
+        debugLog("Search complete or cancelled");
         break;
       }
     }
 
     // Only complete if we weren't cancelled
     if (isSearching) {
-      console.log("Search completed successfully");
+      debugLog("Search completed successfully");
       currentBatch = [];
       currentBatchIndex = 0;
       isSearching = false;
@@ -555,7 +572,7 @@ async function findEventOnRelays() {
       }
     }
   } catch (error) {
-    console.error('Error in search:', error);
+    debugError('Error in search:', error);
     isSearching = false;
     searchCompleted = true;
     searchDuration = (Date.now() - searchStartTime) / 1000;
@@ -573,23 +590,23 @@ function extractSearchFromPath() {
 
 // Process the nevent/naddr and start search
 async function processSearch(value: string) {
-  console.log("processSearch called with:", value);
+  debugLog("processSearch called with:", value);
   if (!value) {
-    console.log("No search value provided");
+    debugLog("No search value provided");
     return;
   }
 
   inputError = '';
   
   try {
-    console.log("Decoding NIP-19:", value);
+    debugLog("Decoding NIP-19:", value);
     // Try to decode as nevent or naddr
     const decoded = nip19.decode(value);
-    console.log("Decoded:", decoded);
+    debugLog("Decoded:", decoded);
     
     if (decoded.type === 'nevent') {
       const data = decoded.data as { id: string; pubkey?: string; relays?: string[] };
-      console.log("Decoded as nevent:", data);
+      debugLog("Decoded as nevent:", data);
       targetEvent = {
         type: 'nevent',
         id: data.id,
@@ -598,7 +615,7 @@ async function processSearch(value: string) {
       };
     } else if (decoded.type === 'naddr') {
       const data = decoded.data as { identifier: string; pubkey: string; kind: number; relays?: string[] };
-      console.log("Decoded as naddr:", data);
+      debugLog("Decoded as naddr:", data);
       targetEvent = {
         type: 'naddr',
         identifier: data.identifier,
@@ -607,12 +624,12 @@ async function processSearch(value: string) {
         relays: data.relays?.map(normalizeRelayUrl) || []
       };
     } else {
-      console.log("Invalid type:", decoded.type);
+      debugLog("Invalid type:", decoded.type);
       inputError = 'Input must be a nevent or naddr';
       return;
     }
     
-    console.log("Target event set:", targetEvent);
+    debugLog("Target event set:", targetEvent);
     // Reset search state before starting new search
     searchCompleted = false;
     isSearching = false;
@@ -624,12 +641,12 @@ async function processSearch(value: string) {
     // Force synchronous execution before starting search
     await new Promise(resolve => setTimeout(resolve, 0));
     
-    console.log("Starting search now...");
+    debugLog("Starting search now...");
     // Start the search
     findEventOnRelays();
     
   } catch (error) {
-    console.error('Error in processSearch:', error);
+    debugError('Error in processSearch:', error);
     inputError = 'Invalid nevent or naddr format';
   }
 }
@@ -652,14 +669,14 @@ onMount(async () => {
   if (searchValue) {
     // Set the input value
     inputValue = searchValue;
-    console.log("Search value from URL:", searchValue);
+    debugLog("Search value from URL:", searchValue);
 
     if (get(foundRelays).size > 0) {
       // If relays already loaded, search immediately
-      console.log("Relays already loaded, searching immediately");
+      debugLog("Relays already loaded, searching immediately");
       processSearch(searchValue);
     } else {
-      console.log("Waiting for relays to load before searching");
+      debugLog("Waiting for relays to load before searching");
       // Wait for relays to be discovered before starting search
       const checkInterval = 500; // ms
       const maxAttempts = 120; // 60 seconds max
@@ -668,16 +685,16 @@ onMount(async () => {
       const relayCheckInterval = setInterval(() => {
         attempts++;
         const relayCount = get(foundRelays).size;
-        console.log(`Relay check attempt ${attempts}: ${relayCount} relays found, loading=${loading}`);
+        debugLog(`Relay check attempt ${attempts}: ${relayCount} relays found, loading=${loading}`);
         
         if (relayCount > 0 && !loading) {
           clearInterval(relayCheckInterval);
-          console.log(`Starting search with ${relayCount} relays`);
+          debugLog(`Starting search with ${relayCount} relays`);
           // Process the search only after relays are available
           setTimeout(() => processSearch(searchValue), 100);
         } else if (attempts >= maxAttempts) {
           clearInterval(relayCheckInterval);
-          console.log("Timeout waiting for relays, attempting search anyway");
+          debugLog("Timeout waiting for relays, attempting search anyway");
           setTimeout(() => processSearch(searchValue), 100);
         }
       }, checkInterval);
@@ -982,6 +999,21 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
             </label>
           </div>
 
+          <div class="flex items-center">
+            <input
+              type="checkbox"
+              id="debugEnabled"
+              class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded dark:border-gray-600 dark:bg-gray-700 dark:ring-offset-gray-800"
+              bind:checked={debug}
+              on:change={() => {
+                savePreferences();
+              }}
+            />
+            <label for="debugEnabled" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
+              Enable Debug Logging
+            </label>
+          </div>
+
           <div>
             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Theme
@@ -1030,8 +1062,11 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
     <p class="text-gray-700 dark:text-gray-300">
       NADAR 2.0 is a tool for finding specific notes on nostr. 
       It discovers relays using <a href="https://github.com/nostr-protocol/nips/blob/master/66.md" class="border-b border-gray-700">NIP-66</a>.
-      2.0 is made by <a href="https://njump.me/npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx" target="_blank" class="border-b border-gray-700">sandwich</a> and is a rewrite of the <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">original</a>.
-    </p>
+      This is a rewrite by 
+      <a href="https://njump.me/npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx" target="_blank" class="border-b border-gray-700">sandwich</a> 
+      of the <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">original NADAR</a> by 
+      <a href="https://njump.me/npub16ema6x3r8x8pe32lwnsll0krqmy79h5vvap8sdd7q5yhy4q2dv6slt6le9" target="_blank" class="border-b border-gray-700">Thorwegian</a>.
+          </p>
   </div>
 
   <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4  rounded-lg p-4">
