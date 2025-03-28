@@ -71,6 +71,7 @@ let npub = window.location.href.match(/npub1[a-z0-9]{59}/)?.[1];
 let isNsite = npub ? true : false;
 let showPreferences = false;
 let discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
+let discoveryRelaysModified = false;
 
 let searchCompleted = false;
 let searchStartTime: number;
@@ -934,19 +935,27 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
               NIP-66 Discovery Relays
             </label>
             <textarea
-              class="w-full h-24 p-2 border rounded font-mono text-sm dark:bg-gray-800 dark:border-gray-700 dark:text-white"
+              class="w-full h-24 p-2 border rounded font-mono text-sm dark:bg-gray-800 dark:border-gray-700 dark:text-white disabled:opacity-75 disabled:bg-gray-100 dark:disabled:bg-gray-900"
               bind:value={discoveryRelaysText}
+              disabled={isSearching}
               on:change={(e) => {
                 const newRelays = e.currentTarget.value
                   .split('\n')
                   .map(r => r.trim())
                   .filter(r => r);
-                DISCOVERY_RELAYS = newRelays;
-                discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
-                savePreferences();
+                
+                // Check if relays have actually changed
+                if (JSON.stringify(newRelays) !== JSON.stringify(DISCOVERY_RELAYS)) {
+                  DISCOVERY_RELAYS = newRelays;
+                  discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
+                  discoveryRelaysModified = true;
+                  savePreferences();
+                } else {
+                  discoveryRelaysModified = false;
+                }
               }}
             />
-            <p class="text-sm text-gray-500 mt-1">One relay URL per line</p>
+            <p class="text-sm text-gray-500 mt-1">One relay URL per line {isSearching ? '(disabled during search)' : ''}</p>
           </div>
 
           <div>
@@ -1042,7 +1051,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
               class="px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
               on:click={() => {
                 resetPreferences();
-                discoverRelays();
+                discoveryRelaysModified = false;
               }}
             >
               Reset to Defaults
@@ -1051,10 +1060,13 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
               class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700"
               on:click={() => {
                 showPreferences = false;
-                discoverRelays();
+                if (discoveryRelaysModified) {
+                  discoverRelays();
+                  discoveryRelaysModified = false;
+                }
               }}
             >
-              Save & Rediscover
+              {discoveryRelaysModified ? 'Save & Rediscover' : 'Save'}
             </button>
           </div>
         </div>
@@ -1269,11 +1281,9 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
                     ? 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400' 
                     : 'bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300'}">
                 <span class="w-1.5 h-1.5 rounded-full 
-                  {$foundOnRelays.has(relay) 
-                    ? 'bg-green-500' 
-                    : $checkedRelays.has(relay) 
-                      ? 'bg-red-500' 
-                      : 'bg-gray-400'}"></span>
+                  {$foundOnRelays.has(relay) && targetEvent.relays?.includes(relay) ? 'bg-green-500' : ''}
+                  {!$foundOnRelays.has(relay) && targetEvent.relays?.includes(relay) ? 'bg-red-500' : ''}
+                  "></span>
                 {relay}
               </div>
             {/each}
@@ -1289,7 +1299,8 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
         {#each [...$foundOnRelays].sort() as relay}
           <div class="p-1.5 bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded shadow text-xs font-mono truncate hover:bg-green-100 dark:hover:bg-green-900/50 flex items-center gap-1">
-            <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+            <span class="w-1.5 h-1.5 rounded-full 
+            {$foundOnRelays.has(relay) && targetEvent.relays?.includes(relay) ? 'bg-green-500' : ''}"></span>
             {relay}
           </div>
         {/each}
