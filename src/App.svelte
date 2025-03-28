@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { NostrFetcher } from 'nostr-fetch';
   import type { Event, Filter } from 'nostr-tools';
   import { Relay, SimplePool } from 'nostr-tools';
   import { nip19 } from 'nostr-tools';
   import { get, writable, type Writable } from 'svelte/store';
-    import type { SubCloser } from 'nostr-tools/abstract-pool';
+  import type { SubCloser } from 'nostr-tools/abstract-pool';
 
   type TargetEvent = {
     type: 'nevent' | 'naddr';
@@ -32,6 +32,7 @@
   let inputError = '';
   let activeRelays: Relay[] = [];
   let activeSubscriptions: SubCloser[] = [];
+  const zapLoaded = writable(false);
 
   const DISCOVERY_RELAYS = [
     'wss://relay.nostr.watch',
@@ -225,76 +226,81 @@
       // Create a promise that resolves when all relays in the batch have sent EOSE
       const batchPromise = new Promise<void>((resolve) => {
         let eoseCount = 0;
+        let connectionPromises: Promise<void>[] = [];
 
         // Create and connect to each relay in the batch
-        currentBatch.forEach(async (relayUrl: string) => {
-          try {
-            const relay = await Relay.connect(relayUrl);
-            let timeout: ReturnType<typeof setTimeout>;
+        for (const relayUrl of currentBatch) {
+          const connectionPromise = (async () => {
+            try {
+              const relay = await Relay.connect(relayUrl);
+              let timeout: ReturnType<typeof setTimeout>;
 
-            // Only add to active relays if connection was successful
-            if (relay.status === 1) {
               activeRelays.push(relay);
-            }
 
-            const finish = () => {
-              if (sub) {
-                try {
-                  const index = activeSubscriptions.indexOf(sub);
-                  if (index > -1) {
-                    activeSubscriptions.splice(index, 1);
+              await new Promise<void>((resolveRelay) => {
+                const finish = () => {
+                  clearTimeout(timeout);
+                  if (sub) {
+                    try {
+                      const index = activeSubscriptions.indexOf(sub);
+                      if (index > -1) {
+                        activeSubscriptions.splice(index, 1);
+                      }
+                      sub.close();
+                    } catch (error) {
+                      console.debug('Error closing subscription in finish:', error);
+                    }
                   }
-                  sub.close();
-                } catch (error) {
-                  console.debug('Error closing subscription in finish:', error);
-                }
-              }
-              
-              try {
-                if (relay.status === 1) {
-                  relay.close();
-                }
-                const relayIndex = activeRelays.indexOf(relay);
-                if (relayIndex > -1) {
-                  activeRelays.splice(relayIndex, 1);
-                }
-              } catch (error) {
-                console.debug('Error closing relay in finish:', error);
-              }
+                  
+                  try {
+                    relay.close();
+                    const relayIndex = activeRelays.indexOf(relay);
+                    if (relayIndex > -1) {
+                      activeRelays.splice(relayIndex, 1);
+                    }
+                  } catch (error) {
+                    console.debug('Error closing relay in finish:', error);
+                  }
 
+                  eoseCount++;
+                  if (eoseCount === currentBatch.length) {
+                    resolve();
+                  }
+                  resolveRelay();
+                };
+                
+                const sub = relay.subscribe([filter], {
+                  onevent() {
+                    if (!isSearching) return;
+                    foundOnRelays.update(relays => {
+                      relays.add(relayUrl);
+                      return relays;
+                    });
+                  },
+                  oneose() {
+                    finish();
+                  }
+                });
+
+                activeSubscriptions.push(sub);
+
+                // Set a timeout to close the subscription and relay after 8 seconds
+                timeout = setTimeout(finish, 8000);
+              });
+            } catch (error) {
+              console.debug('Error connecting to relay:', error);
               eoseCount++;
               if (eoseCount === currentBatch.length) {
                 resolve();
               }
-            };
-            
-            const sub = relay.subscribe([filter], {
-              onevent(event: Event) {
-                if (!isSearching) return;
-                foundOnRelays.update(relays => {
-                  relays.add(relayUrl);
-                  return relays;
-                });
-              },
-              oneose() {
-                clearTimeout(timeout);
-                finish();
-              }
-            });
-
-            // Only track subscription if we successfully subscribed
-            activeSubscriptions.push(sub);
-
-            // Set a timeout to close the subscription and relay after 8 seconds
-            timeout = setTimeout(finish, 8000);
-          } catch (error) {
-            console.debug('Error connecting to relay:', error);
-            eoseCount++;
-            if (eoseCount === currentBatch.length) {
-              resolve();
             }
-          }
-        });
+          })();
+          
+          connectionPromises.push(connectionPromise);
+        }
+
+        // Wait for all connections to be established or failed
+        Promise.all(connectionPromises).catch(console.debug);
       });
 
       // Wait for all relays in the batch to complete
@@ -309,6 +315,9 @@
           });
         }
       });
+
+      // Small delay between batches to let resources be cleaned up
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
     currentBatch = [];
@@ -367,11 +376,40 @@
 
   onMount(() => {
     discoverRelays();
+    import('https://cdn.jsdelivr.net/npm/nostr-zap@latest').then(() => {
+      zapLoaded.set(true);
+    });
+  });
+
+  onDestroy(() => {
+    zapLoaded.set(false);
+    (window as any).nostrZap = undefined;
   });
 </script>
 
-<main class="container mx-auto p-4">
+<main class="container mx-auto p-4 relative">
   <h1 class="text-6xl font-bold mb-4">NADAR <small class="opacity-50">2.0</small></h1>
+
+  {#if zapLoaded}
+  <button
+    class="bg-orange-600 text-white px-4 py-2 absolute top-4 right-4 text-sm"
+    data-npub="npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx"
+    data-relays="wss://lunchbox.sandwich.farm,wss://nostrue.com,wss://relay.damus.io,wss://relay.nostr.band,wss://relay.primal.net,wss://wheat.happytavern.co">
+    Zap Me ⚡️
+  </button>
+  {/if}
+
+    <!-- about section -->
+    <div class="bg-gray-800/10 mb-4  rounded-lg p-4">
+      <p class="text-gray-700">
+        NADAR 2.0 is a tool for finding nevents and naddrs across the Nostr network. 
+        It discovers relays using <a href="https://github.com/nostr-protocol/nips/blob/master/66.md" class="border-b border-gray-700">NIP-66</a> 
+        and searches them to locate user specified events. 
+        2.0 is a rewrite of the <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">original</a>.
+      </p>
+    </div>
+
+  
   
   <div class="mb-4">
     <p class="text-gray-600">
