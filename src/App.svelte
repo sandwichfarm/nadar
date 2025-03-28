@@ -1036,7 +1036,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
 
   <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4  rounded-lg p-4">
     <p class="text-gray-700 dark:text-gray-300">
-      Hint: You add an <code>nevent</code> or <code>naddr</code> to automatically initiate a search 
+      Hint: Add a <code>nevent</code> or <code>naddr</code> to the path to automatically initiate a search 
       <a 
       href="/nevent1qqsyrn5mc5x6wlw624p0qgphpmxzkptd3u47j0quahcm74l0e2cftvqpp4mhxue69uhkummn9ekx7mqpyfmhxue69uhhqatjwpkx2urpvuhx2ue0y5erqur4wfcxcetsv9njuetnqyf8wumn8ghj7ur4wfcxcetsv9njuetnqy0hwumn8ghj7ur4wfcxcetsv9njuetn9acxzcnvdanrw73wvdhk6q3qtfrzlfsyfd9cmgcc229xnpaytcadlqet68ryh453p6k0an0sw4qslpmhr3" 
       target="_blank" 
