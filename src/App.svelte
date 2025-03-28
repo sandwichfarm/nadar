@@ -1,504 +1,652 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
-  import { NostrFetcher } from 'nostr-fetch';
-  import type { Event, Filter } from 'nostr-tools';
-  import { Relay, SimplePool } from 'nostr-tools';
-  import { nip19 } from 'nostr-tools';
-  import { get, writable, type Writable } from 'svelte/store';
-  import type { SubCloser } from 'nostr-tools/abstract-pool';
-  import * as Tone from 'tone';
-  import confetti from 'canvas-confetti';
-
-  const NSITE_PROVIDER = 'nsite.lol'
-  const STATIC_NPUB = 'npub1nadarndr8f0fra505suk85xhvgksqer2vnuqsjkvt2tfm7d0wakqhwlpf5'
-  const CLEARNET_ADDRESS = 'https://nadar.sandwich.farm'
-
-  // Default preferences
-  const DEFAULT_DISCOVERY_RELAYS = [
-    'wss://relay.nostr.watch',
-    'wss://relaypag.es',
-    'wss://monitorlizard.nostr1.com'
-  ];
-  const DEFAULT_MAX_CONCURRENT_RELAYS = 21;
-
-  // Load preferences from localStorage or use defaults
-  let DISCOVERY_RELAYS = JSON.parse(localStorage.getItem('nadar_discovery_relays') || JSON.stringify(DEFAULT_DISCOVERY_RELAYS));
-  let MAX_CONCURRENT_RELAYS = parseInt(localStorage.getItem('nadar_max_concurrent_relays') || DEFAULT_MAX_CONCURRENT_RELAYS.toString());
-
-  type TargetEvent = {
-    type: 'nevent' | 'naddr';
-    id?: string;  // For nevent
-    pubkey?: string;
-    kind?: number;
-    identifier?: string;  // For naddr
-    relays?: string[];
-  };
-
-  let loading = false;
-  let foundRelays: Writable<Set<string>> = writable(new Set());
-  let totalEvents = 0;
-  let startTime: number;
-  let targetEvent: TargetEvent | undefined;
-  let foundOnRelays = writable(new Set<string>());
-  let checkedRelays = writable(new Set<string>());
-  let inputValue = '';
-  let currentBatch: string[] = [];
-  let currentBatchIndex = 0;
-  let totalBatches = 0;
-  let isPaused = false;
-  let isSearching = false;
-  let inputError = '';
-  let activeRelays: Relay[] = [];
-  let activeSubscriptions: SubCloser[] = [];
-  const zapLoaded = writable(false);
-  let npub = window.location.href.match(/npub1[a-z0-9]{59}/)?.[1];
-  let isNsite = npub ? true : false;
-  let showPreferences = false;
-  let discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
-
-  let searchCompleted = false;
-  let searchStartTime: number;
-  let searchDuration = 0;
-  let soundEnabled = false;
-  let synth: Tone.Synth;
-  let pingSound: Tone.Player;
-  let clickSound: Tone.Player;
-
-  // Save preferences to localStorage
-  function savePreferences() {
-    localStorage.setItem('nadar_discovery_relays', JSON.stringify(DISCOVERY_RELAYS));
-    localStorage.setItem('nadar_max_concurrent_relays', MAX_CONCURRENT_RELAYS.toString());
+// Define types for global usage
+declare global {
+  interface Window {
+    nostrZap: any;
   }
+}
 
-  // Reset preferences to defaults
-  function resetPreferences() {
-    DISCOVERY_RELAYS = [...DEFAULT_DISCOVERY_RELAYS];
-    MAX_CONCURRENT_RELAYS = DEFAULT_MAX_CONCURRENT_RELAYS;
-    discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
-    savePreferences();
-  }
+import { onDestroy, onMount } from 'svelte';
+import { NostrFetcher } from 'nostr-fetch';
+import type { Event, Filter } from 'nostr-tools';
+import { Relay, SimplePool } from 'nostr-tools';
+import { nip19 } from 'nostr-tools';
+import { get, writable, type Writable } from 'svelte/store';
+import type { SubCloser } from 'nostr-tools/abstract-pool';
+import * as Tone from 'tone';
+// @ts-ignore - Ignore the missing types for canvas-confetti
+import confetti from 'canvas-confetti';
 
-  // Helper function to normalize relay URLs
-  function normalizeRelayUrl(url: string): string {
-    try {
-      // Remove trailing slashes and convert to lowercase
-      return new URL(url).toString(); 
-    } catch {
-      return url;
-    }
-  }
+const NSITE_PROVIDER = 'nsite.lol'
+const STATIC_NPUB = 'npub1nadarndr8f0fra505suk85xhvgksqer2vnuqsjkvt2tfm7d0wakqhwlpf5'
+const CLEARNET_ADDRESS = 'https://nadar.sandwich.farm'
 
-  // Helper function to extract relay URLs from NIP-66 events
-  function extractRelayUrl(event: Event): string | undefined {
-    let url = undefined;
-    url = event.tags
-      .find(tag => tag[0] === 'd')?.[1]
-    if(url) {
-      url = normalizeRelayUrl(url); 
-    }
+// Default preferences
+const DEFAULT_DISCOVERY_RELAYS = [
+  'wss://relay.nostr.watch',
+  'wss://relaypag.es',
+  'wss://monitorlizard.nostr1.com'
+];
+const DEFAULT_MAX_CONCURRENT_RELAYS = 21;
+const DEFAULT_SOUND_ENABLED = false;
+const DEFAULT_TIMEOUT_MS = 10000;
+
+// Load preferences from localStorage or use defaults
+let DISCOVERY_RELAYS = JSON.parse(localStorage.getItem('nadar_discovery_relays') || JSON.stringify(DEFAULT_DISCOVERY_RELAYS));
+let MAX_CONCURRENT_RELAYS = parseInt(localStorage.getItem('nadar_max_concurrent_relays') || DEFAULT_MAX_CONCURRENT_RELAYS.toString());
+let soundEnabled = localStorage.getItem('nadar_sound_enabled') === 'true' || DEFAULT_SOUND_ENABLED;
+let timeoutMs = parseInt(localStorage.getItem('nadar_timeout_ms') || DEFAULT_TIMEOUT_MS.toString());
+
+type TargetEvent = {
+  type: 'nevent' | 'naddr';
+  id?: string;  // For nevent
+  pubkey?: string;
+  kind?: number;
+  identifier?: string;  // For naddr
+  relays?: string[];
+};
+
+let loading = false;
+let foundRelays: Writable<Set<string>> = writable(new Set());
+let totalEvents = 0;
+let startTime: number;
+let targetEvent: TargetEvent | undefined;
+let foundOnRelays = writable(new Set<string>());
+let checkedRelays = writable(new Set<string>());
+let inputValue = '';
+let currentBatch: string[] = [];
+let currentBatchIndex = 0;
+let totalBatches = 0;
+let isPaused = false;
+let isSearching = false;
+let inputError = '';
+let activeRelays: Relay[] = [];
+let activeSubscriptions: SubCloser[] = [];
+const zapLoaded = writable(false);
+let npub = window.location.href.match(/npub1[a-z0-9]{59}/)?.[1];
+let isNsite = npub ? true : false;
+let showPreferences = false;
+let discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
+
+let searchCompleted = false;
+let searchStartTime: number;
+let searchDuration = 0;
+let synth: Tone.Synth;
+let pingSound: Tone.Player;
+let clickSound: Tone.Player;
+let pageTurnSound: Tone.Player;
+
+// Save preferences to localStorage
+function savePreferences() {
+  localStorage.setItem('nadar_discovery_relays', JSON.stringify(DISCOVERY_RELAYS));
+  localStorage.setItem('nadar_max_concurrent_relays', MAX_CONCURRENT_RELAYS.toString());
+  localStorage.setItem('nadar_sound_enabled', soundEnabled.toString());
+  localStorage.setItem('nadar_timeout_ms', timeoutMs.toString());
+}
+
+// Reset preferences to defaults
+function resetPreferences() {
+  DISCOVERY_RELAYS = [...DEFAULT_DISCOVERY_RELAYS];
+  MAX_CONCURRENT_RELAYS = DEFAULT_MAX_CONCURRENT_RELAYS;
+  soundEnabled = DEFAULT_SOUND_ENABLED;
+  timeoutMs = DEFAULT_TIMEOUT_MS;
+  discoveryRelaysText = DISCOVERY_RELAYS.join('\n');
+  savePreferences();
+}
+
+// Helper function to normalize relay URLs
+function normalizeRelayUrl(url: string): string {
+  try {
+    // Remove trailing slashes and convert to lowercase
+    return new URL(url).toString(); 
+  } catch {
     return url;
   }
+}
 
-  async function discoverRelays() {
-    loading = true;
-    foundRelays.set(new Set());
-    totalEvents = 0;
-    startTime = Date.now();
+// Helper function to extract relay URLs from NIP-66 events
+function extractRelayUrl(event: Event): string | undefined {
+  let url = undefined;
+  url = event.tags
+    .find(tag => tag[0] === 'd')?.[1]
+  if(url) {
+    url = normalizeRelayUrl(url); 
+  }
+  return url;
+}
 
-    const fetcher = NostrFetcher.init();
+async function discoverRelays() {
+  loading = true;
+  foundRelays.set(new Set());
+  totalEvents = 0;
+  startTime = Date.now();
 
+  const fetcher = NostrFetcher.init();
+
+  try {
+    const nHoursAgo = (hrs: number): number =>
+      Math.floor((Date.now() - hrs * 60 * 60 * 1000) / 1000);
+
+    const eventIter = fetcher.allEventsIterator(
+      DISCOVERY_RELAYS,
+      { kinds: [30166] },
+      { since: nHoursAgo(24) },
+      { skipFilterMatching: true, skipVerification: true }
+    );
+
+    for await (const event of eventIter) {
+      totalEvents++;
+      const url = extractRelayUrl(event);
+      if(!url) continue;
+      foundRelays.update(relays => {
+        relays.add(url);
+        return relays;
+      });
+    }
+  } catch (error) {
+    console.error('Error discovering relays:', error);
+  } finally {
+    loading = false;
+  }
+}
+
+async function cleanupActiveConnections() {
+  // First close all subscriptions
+  for (const sub of activeSubscriptions) {
     try {
-      const nHoursAgo = (hrs: number): number =>
-        Math.floor((Date.now() - hrs * 60 * 60 * 1000) / 1000);
-
-      const eventIter = fetcher.allEventsIterator(
-        DISCOVERY_RELAYS,
-        { kinds: [30166] },
-        { since: nHoursAgo(24) },
-        { skipFilterMatching: true, skipVerification: true }
-      );
-
-      for await (const event of eventIter) {
-        totalEvents++;
-        const url = extractRelayUrl(event);
-        if(!url) continue;
-        foundRelays.update(relays => {
-          relays.add(url);
-          return relays;
-        });
-      }
+      sub.close();
     } catch (error) {
-      console.error('Error discovering relays:', error);
-    } finally {
-      loading = false;
+      console.debug('Error closing subscription:', error);
     }
   }
+  activeSubscriptions = [];
 
-  async function cleanupActiveConnections() {
-    // First close all subscriptions
-    for (const sub of activeSubscriptions) {
-      try {
-        sub.close();
-      } catch (error) {
-        console.debug('Error closing subscription:', error);
+  // Then close all relay connections
+  for (const relay of activeRelays) {
+    try {
+      // Only close if the connection is still open
+      if ((relay as any).status === 1) {
+        relay.close();
       }
+    } catch (error) {
+      console.debug('Error closing relay:', error);
     }
-    activeSubscriptions = [];
+  }
+  activeRelays = [];
+}
 
-    // Then close all relay connections
-    for (const relay of activeRelays) {
+function togglePause() {
+  if (isPaused) {
+    // Resume all active relays
+    activeRelays.forEach(relay => {
       try {
-        // Only close if the connection is still open
-        if (relay.status === 1) {
+        if ((relay as any).status === 3) { // CLOSED
+          relay.connect();
+        }
+      } catch (error) {
+        console.debug('Error resuming relay:', error);
+      }
+    });
+  } else {
+    // Pause all active relays
+    activeRelays.forEach(relay => {
+      try {
+        if ((relay as any).status === 1) { // CONNECTED
           relay.close();
         }
       } catch (error) {
-        console.debug('Error closing relay:', error);
+        console.debug('Error pausing relay:', error);
       }
-    }
-    activeRelays = [];
-  }
-
-  function togglePause() {
-    if (isPaused) {
-      // Resume all active relays
-      activeRelays.forEach(relay => {
-        try {
-          if (relay.status === 3) { // CLOSED
-            relay.connect();
-          }
-        } catch (error) {
-          console.debug('Error resuming relay:', error);
-        }
-      });
-    } else {
-      // Pause all active relays
-      activeRelays.forEach(relay => {
-        try {
-          if (relay.status === 1) { // CONNECTED
-            relay.close();
-          }
-        } catch (error) {
-          console.debug('Error pausing relay:', error);
-        }
-      });
-    }
-    isPaused = !isPaused;
-  }
-
-  async function restartSearch() {
-    // First stop the search
-    isSearching = false;
-    isPaused = false;
-
-    // Reset state before cleanup to prevent any new events from being processed
-    foundOnRelays.set(new Set());
-    checkedRelays.set(new Set());
-    targetEvent = undefined;
-    inputError = '';
-    currentBatch = [];
-    currentBatchIndex = 0;
-
-    // Then cleanup connections
-    await cleanupActiveConnections();
-  }
-
-  async function findEventOnRelays() {
-    if (!targetEvent) return;
-    
-    // Clean up any existing connections first
-    await cleanupActiveConnections();
-    
-    isSearching = true;
-    isPaused = false;
-    searchCompleted = false;
-    searchStartTime = Date.now();
-    foundOnRelays.set(new Set()); 
-    checkedRelays.set(new Set());
-
-    // Play initial radar sound
-    await playRadarSound();
-    
-    // Sort relays to prioritize those from the NIP-19 encoding
-    const relayArray = [...get(foundRelays)];
-    const sortedRelays = relayArray.sort((a, b) => {
-      // Normalize both the relay URLs from NIP-19 and the found relays for comparison
-      const normalizedA = normalizeRelayUrl(a);
-      const normalizedB = normalizeRelayUrl(b);
-      const normalizedNip19Relays = targetEvent?.relays?.map(normalizeRelayUrl) || [];
-      
-      const aInNip19 = normalizedNip19Relays.includes(normalizedA);
-      const bInNip19 = normalizedNip19Relays.includes(normalizedB);
-      
-      if (aInNip19 && !bInNip19) return -1;
-      if (!aInNip19 && bInNip19) return 1;
-      return 0;
     });
+  }
+  isPaused = !isPaused;
+}
 
-    totalBatches = Math.ceil(sortedRelays.length / MAX_CONCURRENT_RELAYS);
+async function restartSearch() {
+  // First stop the search
+  isSearching = false;
+  isPaused = false;
 
-    // Create the appropriate filter based on the type
-    const filter: Filter = targetEvent.type === 'nevent' 
-      ? { ids: [targetEvent.id!] }
-      : {
-          authors: [targetEvent.pubkey!],
-          kinds: [targetEvent.kind!]
-        };
+  // Reset state before cleanup to prevent any new events from being processed
+  foundOnRelays.set(new Set());
+  checkedRelays.set(new Set());
+  targetEvent = undefined;
+  inputError = '';
+  currentBatch = [];
+  currentBatchIndex = 0;
 
-    if(targetEvent?.identifier) {
-      filter['#d'] = [targetEvent.identifier];
-    }
+  // Then cleanup connections
+  await cleanupActiveConnections();
+}
 
-    // Process relays in batches of MAX_CONCURRENT_RELAYS
-    try {
-      for (let i = 0; i < sortedRelays.length && isSearching; i += MAX_CONCURRENT_RELAYS) {
-        if (isPaused) {
-          await new Promise(resolve => {
-            const checkPause = setInterval(() => {
-              if (!isPaused) {
-                clearInterval(checkPause);
-                resolve(undefined);
+async function findEventOnRelays() {
+  if (!targetEvent) return;
+  
+  // Clean up any existing connections first
+  await cleanupActiveConnections();
+  
+  isSearching = true;
+  isPaused = false;
+  searchCompleted = false;
+  searchStartTime = Date.now();
+  foundOnRelays.set(new Set()); 
+  checkedRelays.set(new Set());
+  currentBatch = [];
+  currentBatchIndex = 0;
+
+  // Sort relays to prioritize those from the NIP-19 encoding
+  const relayArray = [...get(foundRelays)];
+  const sortedRelays = relayArray.sort((a, b) => {
+    const normalizedA = normalizeRelayUrl(a);
+    const normalizedB = normalizeRelayUrl(b);
+    const normalizedNip19Relays = targetEvent?.relays?.map(normalizeRelayUrl) || [];
+    
+    const aInNip19 = normalizedNip19Relays.includes(normalizedA);
+    const bInNip19 = normalizedNip19Relays.includes(normalizedB);
+    
+    if (aInNip19 && !bInNip19) return -1;
+    if (!aInNip19 && bInNip19) return 1;
+    return 0;
+  });
+
+  if (sortedRelays.length === 0) {
+    isSearching = false;
+    searchCompleted = true;
+    searchDuration = (Date.now() - searchStartTime) / 1000;
+    return;
+  }
+
+  totalBatches = Math.ceil(sortedRelays.length / MAX_CONCURRENT_RELAYS);
+
+  // Create the appropriate filter based on the type
+  const filter: Filter = targetEvent.type === 'nevent' 
+    ? { ids: [targetEvent.id!] }
+    : {
+        authors: [targetEvent.pubkey!],
+        kinds: [targetEvent.kind!]
+      };
+
+  if(targetEvent?.identifier) {
+    filter['#d'] = [targetEvent.identifier];
+  }
+
+  // Process relays in batches of MAX_CONCURRENT_RELAYS
+  try {
+    let previousBatchIndex = 0;
+    
+    for (let i = 0; i < sortedRelays.length && isSearching; i += MAX_CONCURRENT_RELAYS) {
+      if (isPaused) {
+        await new Promise(resolve => {
+          const checkPause = setInterval(() => {
+            if (!isPaused) {
+              clearInterval(checkPause);
+              resolve(undefined);
+            }
+          }, 100);
+        });
+      }
+
+      if (!isSearching) break;
+
+      currentBatchIndex = Math.floor(i / MAX_CONCURRENT_RELAYS) + 1;
+      
+      // Play page turn sound when changing batches
+      if (soundEnabled && currentBatchIndex !== previousBatchIndex) {
+        await playPageTurnSound();
+        previousBatchIndex = currentBatchIndex;
+      }
+      
+      currentBatch = sortedRelays.slice(i, i + MAX_CONCURRENT_RELAYS);
+      
+      // Track if we've found a relay in this batch
+      let foundRelayInCurrentBatch = false;
+
+      // Process each relay in the batch with a small delay between connections
+      const batchPromises = currentBatch.map(async (relayUrl, index) => {
+        if (!isSearching) return;
+
+        // Add a small delay between connection attempts
+        await new Promise(resolve => setTimeout(resolve, index * 50));
+
+        let relay: Relay | undefined;
+        try {
+          relay = new Relay(relayUrl);
+          activeRelays.push(relay);
+          
+          await relay.connect();
+          
+          // Set up a timeout for the relay query
+          const timeoutPromise = new Promise<null>((resolve) => {
+            setTimeout(() => resolve(null), timeoutMs);
+          });
+          
+          // Create a promise that resolves when we find the event on this relay
+          const findPromise = new Promise<boolean>((resolve) => {
+            if (!relay) return resolve(false);
+            
+            const sub = relay.subscribe([filter], {
+              onevent: (event) => {
+                const isFirstFound = !foundRelayInCurrentBatch;
+                
+                foundOnRelays.update(relays => {
+                  relays.add(relayUrl);
+                  return relays;
+                });
+                
+                // Play radar sound on the first relay found in this batch
+                if (soundEnabled && isFirstFound) {
+                  foundRelayInCurrentBatch = true;
+                  playRadarSound();
+                }
+
+                sub.close();
+                resolve(true);
+              },
+              oneose: () => {
+                sub.close();
+                resolve(false);
               }
-            }, 100);
+            });
+            
+            activeSubscriptions.push(sub);
+          });
+          
+          // Race between finding the event and timing out
+          const found = await Promise.race([findPromise, timeoutPromise]);
+          
+          return { relayUrl, success: true, found: !!found };
+        } catch (error) {
+          console.error(`Error with relay ${relayUrl}:`, error);
+          return { relayUrl, success: false, found: false };
+        } finally {
+          if (relay) {
+            try {
+              relay.close();
+              const index = activeRelays.indexOf(relay);
+              if (index > -1) {
+                activeRelays.splice(index, 1);
+              }
+            } catch (error) {
+              console.error(`Error closing relay ${relayUrl}:`, error);
+            }
+          }
+        }
+      });
+
+      // Wait for all batch promises to complete and update checkedRelays
+      const results = await Promise.all(batchPromises);
+      
+      // Only update checkedRelays after all promises in the batch are complete
+      results.forEach(result => {
+        if (result) {
+          checkedRelays.update(relays => {
+            relays.add(result.relayUrl);
+            return relays;
           });
         }
+      });
 
-        if (!isSearching) break; // Check if search was cancelled
+      // Add a small delay between batches
+      await new Promise(resolve => setTimeout(resolve, 100));
 
-        currentBatchIndex = Math.floor(i / MAX_CONCURRENT_RELAYS) + 1;
-        currentBatch = sortedRelays.slice(i, i + MAX_CONCURRENT_RELAYS);
-        
-        // Play radar sound for each new batch
-        await playRadarSound();
+      // Check if we've completed all relays
+      if (get(checkedRelays).size === sortedRelays.length) {
+        break;
+      }
+    }
 
-        const batchPromises = currentBatch.map(async (relayUrl) => {
-          if (!isSearching) return; // Check if search was cancelled
+    // Only complete if we weren't cancelled
+    if (isSearching) {
+      currentBatch = [];
+      currentBatchIndex = 0;
+      isSearching = false;
+      searchCompleted = true;
+      searchDuration = (Date.now() - searchStartTime) / 1000;
 
-          try {
-            const pool = new SimplePool();
-            const events = await pool.list([relayUrl], [filter]);
-            
-            if (events && events.length > 0) {
-              foundOnRelays.update(relays => {
-                relays.add(relayUrl);
-                return relays;
-              });
-              // Play found sound when a relay returns the event
-              await playFoundSound();
-            }
-            
-            checkedRelays.update(relays => {
-              relays.add(relayUrl);
-              return relays;
-            });
-            
-            await pool.close([relayUrl]);
-          } catch (error) {
-            console.error(`Error with relay ${relayUrl}:`, error);
-            checkedRelays.update(relays => {
-              relays.add(relayUrl);
-              return relays;
-            });
-          }
+      // Play completion sounds if enabled
+      if (soundEnabled) {
+        const foundCount = get(foundOnRelays).size;
+        if (foundCount > 0) {
+          await playSuccessSound();
+        } else {
+          await playFailureSound();
+        }
+      }
+
+      // Show confetti if relays were found
+      const foundCount = get(foundOnRelays).size;
+      if (foundCount > 0) {
+        const canvas = document.createElement('canvas');
+        canvas.style.position = 'fixed';
+        canvas.style.top = '0';
+        canvas.style.left = '0';
+        canvas.style.width = '100%';
+        canvas.style.height = '100%';
+        canvas.style.pointerEvents = 'none';
+        canvas.style.zIndex = '9999';
+        document.body.appendChild(canvas);
+
+        const myConfetti = confetti.create(canvas, {
+          resize: true,
+          useWorker: true
         });
 
-        // Wait for all promises in the batch to complete
-        await Promise.all(batchPromises.filter(p => p !== undefined));
-      }
+        // Fire confetti from the input field position
+        const input = document.querySelector('input[type="text"]');
+        if (input) {
+          const rect = input.getBoundingClientRect();
+          const x = (rect.left + rect.right) / 2 / window.innerWidth;
+          const y = rect.bottom / window.innerHeight;
 
-      // Only complete if we weren't cancelled and all relays have been checked
-      if (isSearching) {
-        const checkedCount = get(checkedRelays).size;
-        if (checkedCount === sortedRelays.length) {
-          currentBatch = [];
-          currentBatchIndex = 0;
-          isSearching = false;
-          searchCompleted = true;
-          searchDuration = (Date.now() - searchStartTime) / 1000;
+          myConfetti({
+            particleCount: 100,
+            spread: 70,
+            origin: { x, y }
+          });
 
-          // Play success/failure sound based on results
-          const foundCount = get(foundOnRelays).size;
-          if (foundCount > 0) {
-            await playSuccessSound();
-          } else {
-            await playFailureSound();
-          }
-
-          // Trigger confetti only if relays were found
-          if (foundCount > 0) {
-            const canvas = document.createElement('canvas');
-            canvas.style.position = 'fixed';
-            canvas.style.top = '0';
-            canvas.style.left = '0';
-            canvas.style.width = '100%';
-            canvas.style.height = '100%';
-            canvas.style.pointerEvents = 'none';
-            canvas.style.zIndex = '9999';
-            document.body.appendChild(canvas);
-
-            const myConfetti = confetti.create(canvas, {
-              resize: true,
-              useWorker: true
-            });
-
-            // Fire confetti from the input field position
-            const input = document.querySelector('input[type="text"]');
-            if (input) {
-              const rect = input.getBoundingClientRect();
-              const x = (rect.left + rect.right) / 2 / window.innerWidth;
-              const y = rect.bottom / window.innerHeight;
-
-              myConfetti({
-                particleCount: 100,
-                spread: 70,
-                origin: { x, y }
-              });
-
-              // Remove canvas after animation
-              setTimeout(() => {
-                canvas.remove();
-              }, 5000);
-            }
-          }
+          // Remove canvas after animation
+          setTimeout(() => {
+            canvas.remove();
+          }, 5000);
         }
+      }
+    }
+  } catch (error) {
+    console.error('Error in search:', error);
+    isSearching = false;
+  }
+}
+
+function handleInput(event: KeyboardEvent) {
+  if (event.key === 'Enter') {
+    const input = event.currentTarget as HTMLInputElement;
+    const value = input.value.trim();
+    if (!value) return;
+
+    inputError = '';
+    
+    // Check if it's a nevent or naddr
+    if (!value.startsWith('nevent1') && !value.startsWith('naddr1')) {
+      inputError = 'Input must be a nevent or naddr';
+      input.value = '';
+      return;
+    }
+
+    try {
+      // Try to decode as nevent or naddr
+      const decoded = nip19.decode(value);
+      if (decoded.type === 'nevent') {
+        const data = decoded.data as { id: string; pubkey?: string; relays?: string[] };
+        targetEvent = {
+          type: 'nevent',
+          id: data.id,
+          pubkey: data.pubkey,
+          relays: data.relays?.map(normalizeRelayUrl) || []
+        };
+      } else if (decoded.type === 'naddr') {
+        const data = decoded.data as { identifier: string; pubkey: string; kind: number; relays?: string[] };
+        targetEvent = {
+          type: 'naddr',
+          identifier: data.identifier,
+          pubkey: data.pubkey,
+          kind: data.kind,
+          relays: data.relays?.map(normalizeRelayUrl) || []
+        };
+      }
+      
+      if (targetEvent) {
+        // Reset search state before starting new search
+        searchCompleted = false;
+        isSearching = false;
+        foundOnRelays.set(new Set());
+        checkedRelays.set(new Set());
+        currentBatch = [];
+        currentBatchIndex = 0;
+        
+        // Start the search
+        findEventOnRelays();
       }
     } catch (error) {
-      console.error('Error in search:', error);
-      isSearching = false;
+      inputError = 'Invalid nevent or naddr format';
+      console.error('Error decoding NIP-19:', error);
     }
+    
+    input.value = '';
   }
+}
 
-  function handleInput(event: KeyboardEvent) {
-    if (event.key === 'Enter') {
-      const input = event.currentTarget as HTMLInputElement;
-      const value = input.value.trim();
-      if (!value) return;
+onMount(() => {
+  discoverRelays();
+  import('https://cdn.jsdelivr.net/npm/nostr-zap@latest' as any).then(() => {
+    zapLoaded.set(true);
+  });
+});
 
-      inputError = '';
-      
-      // Check if it's a nevent or naddr
-      if (!value.startsWith('nevent1') && !value.startsWith('naddr1')) {
-        inputError = 'Input must be a nevent or naddr';
-        input.value = '';
-        return;
-      }
+onMount(async () => {
+  // Create reverb and delay effects for radar sound
+  const reverb = new Tone.Reverb({
+    decay: 2.5,
+    wet: 0.4
+  }).toDestination();
+  
+  const delay = new Tone.FeedbackDelay({
+    delayTime: 0.2,
+    feedback: 0.3,
+    wet: 0.3
+  }).connect(reverb);
 
-      try {
-        // Try to decode as nevent or naddr
-        const decoded = nip19.decode(value);
-        if (decoded.type === 'nevent') {
-          const data = decoded.data as { id: string; pubkey?: string; relays?: string[] };
-          targetEvent = {
-            type: 'nevent',
-            id: data.id,
-            pubkey: data.pubkey,
-            relays: data.relays?.map(normalizeRelayUrl) || []
-          };
-        } else if (decoded.type === 'naddr') {
-          const data = decoded.data as { identifier: string; pubkey: string; kind: number; relays?: string[] };
-          targetEvent = {
-            type: 'naddr',
-            identifier: data.identifier,
-            pubkey: data.pubkey,
-            kind: data.kind,
-            relays: data.relays?.map(normalizeRelayUrl) || []
-          };
-        }
-        
-        if (targetEvent) {
-          findEventOnRelays();
-        }
-      } catch (error) {
-        inputError = 'Invalid nevent or naddr format';
-        console.error('Error decoding NIP-19:', error);
-      }
-      
-      input.value = '';
+  // Initialize Tone.js synth for radar sound with effects
+  synth = new Tone.Synth({
+    oscillator: {
+      type: "sine"
+    },
+    envelope: {
+      attack: 0.01,
+      decay: 0.2,
+      sustain: 0,
+      release: 0.5
     }
-  }
+  }).connect(delay);
 
-  onMount(() => {
-    discoverRelays();
-    import('https://cdn.jsdelivr.net/npm/nostr-zap@latest').then(() => {
-      zapLoaded.set(true);
-    });
-  });
+  // Initialize ping sound for relay discovery
+  pingSound = new Tone.Player({
+    url: "https://cdn.freesound.org/previews/242/242856_4284968-lq.mp3",
+    autostart: false,
+    volume: -10
+  }).toDestination();
 
-  onMount(async () => {
-    // Initialize Tone.js synth for radar sound
-    synth = new Tone.Synth({
-      oscillator: {
-        type: "sine"
-      },
-      envelope: {
-        attack: 0.01,
-        decay: 0.2,
-        sustain: 0,
-        release: 0.2
-      }
-    }).toDestination();
+  // Initialize click sound for relay found
+  clickSound = new Tone.Player({
+    url: "https://cdn.freesound.org/previews/242/242857_4284968-lq.mp3",
+    autostart: false,
+    volume: -15
+  }).toDestination();
 
-    // Initialize ping sound for relay discovery
-    pingSound = new Tone.Player({
-      url: "https://cdn.freesound.org/previews/242/242856_4284968-lq.mp3",
-      autostart: false,
-      volume: -10
-    }).toDestination();
+  await Tone.loaded();
+});
 
-    // Initialize click sound for relay found
-    clickSound = new Tone.Player({
-      url: "https://cdn.freesound.org/previews/242/242857_4284968-lq.mp3",
-      autostart: false,
-      volume: -15
-    }).toDestination();
+// Sound effect functions
+async function playRadarSound() {
+  if (!soundEnabled) return;
+  await Tone.start();
+  
+  // Create a more realistic sonar/radar sound
+  const now = Tone.now();
+  
+  // First ping
+  synth.triggerAttackRelease("A5", "32n", now);
+  
+  // Echo effect manually created with decreasing volume
+  synth.volume.setValueAtTime(-15, now + 0.1);
+  synth.triggerAttackRelease("A5", "32n", now + 0.1);
+  
+  synth.volume.setValueAtTime(-20, now + 0.2);
+  synth.triggerAttackRelease("A5", "32n", now + 0.2);
+  
+  synth.volume.setValueAtTime(-25, now + 0.3);
+  synth.triggerAttackRelease("A5", "32n", now + 0.3);
+  
+  // Reset volume
+  synth.volume.setValueAtTime(0, now + 0.4);
+}
 
-    await Tone.loaded();
-  });
+async function playPageTurnSound() {
+  if (!soundEnabled) return;
+  await Tone.start();
+  
+  // Create a paper-like rustling sound
+  const now = Tone.now();
+  
+  // Quick ascending notes with decreasing volume for paper rustle effect
+  synth.volume.setValueAtTime(-10, now);
+  synth.triggerAttackRelease("G4", "32n", now);
+  
+  synth.volume.setValueAtTime(-15, now + 0.05);
+  synth.triggerAttackRelease("A4", "32n", now + 0.05);
+  
+  synth.volume.setValueAtTime(-20, now + 0.1);
+  synth.triggerAttackRelease("B4", "32n", now + 0.1);
+  
+  // Reset volume
+  synth.volume.setValueAtTime(0, now + 0.15);
+}
 
-  // Sound effect functions
-  async function playRadarSound() {
-    if (!soundEnabled) return;
-    await Tone.start();
-    synth.triggerAttackRelease("G4", "16n");
-    setTimeout(() => synth.triggerAttackRelease("C4", "16n"), 200);
-  }
+async function playFoundSound() {
+  if (!soundEnabled) return;
+  await Tone.start();
+  clickSound.start();
+}
 
-  async function playFoundSound() {
-    if (!soundEnabled) return;
-    await Tone.start();
-    clickSound.start();
-  }
+async function playSuccessSound() {
+  if (!soundEnabled) return;
+  await Tone.start();
+  const now = Tone.now();
+  synth.triggerAttackRelease("C4", "8n", now);
+  synth.triggerAttackRelease("E4", "8n", now + 0.1);
+  synth.triggerAttackRelease("G4", "8n", now + 0.2);
+  synth.triggerAttackRelease("C5", "4n", now + 0.3);
+}
 
-  async function playSuccessSound() {
-    if (!soundEnabled) return;
-    await Tone.start();
-    const now = Tone.now();
-    synth.triggerAttackRelease("C4", "8n", now);
-    synth.triggerAttackRelease("E4", "8n", now + 0.1);
-    synth.triggerAttackRelease("G4", "8n", now + 0.2);
-    synth.triggerAttackRelease("C5", "4n", now + 0.3);
-  }
+async function playFailureSound() {
+  if (!soundEnabled) return;
+  await Tone.start();
+  const now = Tone.now();
+  synth.triggerAttackRelease("C4", "8n", now);
+  synth.triggerAttackRelease("B3", "8n", now + 0.1);
+  synth.triggerAttackRelease("Bb3", "8n", now + 0.2);
+  synth.triggerAttackRelease("A3", "4n", now + 0.3);
+}
 
-  async function playFailureSound() {
-    if (!soundEnabled) return;
-    await Tone.start();
-    const now = Tone.now();
-    synth.triggerAttackRelease("C4", "8n", now);
-    synth.triggerAttackRelease("B3", "8n", now + 0.1);
-    synth.triggerAttackRelease("Bb3", "8n", now + 0.2);
-    synth.triggerAttackRelease("A3", "4n", now + 0.3);
-  }
+// Clean up function
+onDestroy(() => {
+  zapLoaded.set(false);
+  (window as any).nostrZap = undefined;
+  if (synth) synth.dispose();
+  if (pingSound) pingSound.dispose();
+  if (clickSound) clickSound.dispose();
+});
 
-  // Clean up function
-  onDestroy(() => {
-    zapLoaded.set(false);
-    (window as any).nostrZap = undefined;
-    if (synth) synth.dispose();
-    if (pingSound) pingSound.dispose();
-    if (clickSound) clickSound.dispose();
-  });
-
-  $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_PROVIDER}`
+$: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_PROVIDER}`
 </script>
 
 <main class="container mx-auto p-4 relative">
@@ -518,6 +666,7 @@
               // Initialize audio context with a user gesture
               Tone.start();
             }
+            savePreferences();
           }}>
           {#if soundEnabled}
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
@@ -609,6 +758,43 @@
               }}
             />
             <p class="text-sm text-gray-500 mt-1">Number of relays to query simultaneously (1-100)</p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">
+              Relay Query Timeout (ms)
+            </label>
+            <input
+              type="number"
+              min="1000"
+              max="30000"
+              step="1000"
+              class="w-full p-2 border rounded"
+              bind:value={timeoutMs}
+              on:change={(e) => {
+                timeoutMs = parseInt(e.currentTarget.value);
+                savePreferences();
+              }}
+            />
+            <p class="text-sm text-gray-500 mt-1">Maximum time to wait for each relay (1000-30000ms)</p>
+          </div>
+
+          <div class="flex items-center">
+            <input
+              type="checkbox"
+              id="soundEnabled"
+              class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+              bind:checked={soundEnabled}
+              on:change={() => {
+                if (soundEnabled) {
+                  Tone.start();
+                }
+                savePreferences();
+              }}
+            />
+            <label for="soundEnabled" class="ml-2 block text-sm text-gray-700">
+              Enable Sound Effects
+            </label>
           </div>
 
           <div class="flex justify-end gap-2 mt-6">
@@ -764,7 +950,7 @@
               class="ml-2 p-1.5 text-gray-600 hover:text-gray-800 rounded-md hover:bg-gray-100"
               title="Copy ID"
               on:click={() => {
-                if (targetEvent.id) {
+                if (targetEvent?.id) {
                   navigator.clipboard.writeText(targetEvent.id);
                 }
               }}>
