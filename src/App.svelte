@@ -7,6 +7,10 @@
   import { get, writable, type Writable } from 'svelte/store';
   import type { SubCloser } from 'nostr-tools/abstract-pool';
 
+  const NSITE_PROVIDER = 'nsite.lol'
+  const STATIC_NPUB = 'npub1nadarndr8f0fra505suk85xhvgksqer2vnuqsjkvt2tfm7d0wakqhwlpf5'
+  const CLEARNET_ADDRESS = 'https://nadar.sandwich.farm'
+
   type TargetEvent = {
     type: 'nevent' | 'naddr';
     id?: string;  // For nevent
@@ -33,6 +37,8 @@
   let activeRelays: Relay[] = [];
   let activeSubscriptions: SubCloser[] = [];
   const zapLoaded = writable(false);
+  let npub = window.location.href.match(/npub1[a-z0-9]{59}/)?.[1];
+  let isNsite = npub ? true : false;
 
   const DISCOVERY_RELAYS = [
     'wss://relay.nostr.watch',
@@ -385,6 +391,8 @@
     zapLoaded.set(false);
     (window as any).nostrZap = undefined;
   });
+
+  $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_PROVIDER}`
 </script>
 
 <main class="container mx-auto p-4 relative">
@@ -394,12 +402,35 @@
   </div>
 
   {#if zapLoaded}
-  <button
-    class="bg-orange-600 text-white px-4 py-2 absolute top-4 right-4 text-sm"
-    data-npub="npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx"
-    data-relays="wss://lunchbox.sandwich.farm,wss://nostrue.com,wss://relay.damus.io,wss://relay.nostr.band,wss://relay.primal.net,wss://wheat.happytavern.co">
-    Zap Me ⚡️
-  </button>
+    <div class="absolute top-4 right-4 flex gap-2">
+      <a 
+        href="https://github.com/sandwichfarm/nadar"
+        target="_blank"
+        class="bg-gray-600 text-white px-4 py-2 text-sm">
+        github
+      </a>
+      {#if isNsite}
+      <a 
+        href="{alternateLink}"
+        target="_blank"
+        class="bg-gray-600 text-white px-4 py-2 text-sm">
+        clearnet
+      </a>
+      {:else}
+      <a 
+        href="{alternateLink}"
+        target="_blank"
+        class="bg-purple-600 text-white px-4 py-2 text-sm">
+        nsite
+      </a>
+      {/if}
+      <button
+        class="bg-orange-600 text-white px-4 py-2 text-sm"
+        data-npub="npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx"
+        data-relays="wss://lunchbox.sandwich.farm,wss://nostrue.com,wss://relay.damus.io,wss://relay.nostr.band,wss://relay.primal.net,wss://wheat.happytavern.co">
+        Zap Me ⚡️
+      </button>
+    </div>
   {/if}
 
     <!-- about section -->
