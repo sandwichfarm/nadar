@@ -1885,6 +1885,17 @@ async function fetchAndCheckNotes(limit: number = 20) {
     {/if}
   </div>
 
+  <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4 rounded-lg p-4 text-sm">
+    <p class="text-gray-700 dark:text-gray-300">
+      NADAR 2.0 is a tool for finding specific notes on nostr. 
+      It discovers relays using <a href="https://github.com/nostr-protocol/nips/blob/master/66.md" class="border-b border-gray-700">NIP-66</a>.
+      This is a rewrite by 
+      <a href="https://njump.me/npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx" target="_blank" class="border-b border-gray-700">sandwich</a> 
+      of the <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">original NADAR</a> by 
+      <a href="https://njump.me/npub16ema6x3r8x8pe32lwnsll0krqmy79h5vvap8sdd7q5yhy4q2dv6slt6le9" target="_blank" class="border-b border-gray-700">Thorwegian</a>.
+          </p>
+  </div>
+
   <!-- Mode Switcher Tabs -->
   <div class="flex mb-6 border-b dark:border-gray-700">
     <button
@@ -1892,16 +1903,31 @@ async function fetchAndCheckNotes(limit: number = 20) {
       on:click={() => switchMode(1)}
       disabled={isSearching || loadingNotes}
     >
-      Find Note by ID
+      Note Locator
     </button>
     <button
       class="px-4 py-2 font-medium {activeMode === 2 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400' : 'text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400'} disabled:opacity-50 disabled:cursor-not-allowed"
       on:click={() => switchMode(2)}
       disabled={isSearching || loadingNotes}
     >
-      Check Your Notes
+      Relay Propagation Checker
     </button>
   </div>
+
+  {#if activeMode === 1}
+  <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4 rounded-lg p-4 text-sm">
+    <p class="text-gray-700 dark:text-gray-300">
+      Provide a <code>nevent</code>, <code>naddr</code> or <code>hex id</code> and NADAR will try to find it all all known relays.
+    </p>
+  </div>
+  {:else if activeMode === 2}
+  <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4 rounded-lg p-4 text-sm">
+    <p class="text-gray-700 dark:text-gray-300">
+      Login or provide an <code>npub</code>, <code>nprofile</code> or <code>hex public key</code> and NADAR will
+      will find your relay list and check the propagation rate of your notes amongst your relays.
+    </p>
+  </div>
+  {/if}
 
   {#if showPreferences}
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -2065,27 +2091,7 @@ async function fetchAndCheckNotes(limit: number = 20) {
   {/if}
 
   <!-- about section -->
-  <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4 rounded-lg p-4">
-    <p class="text-gray-700 dark:text-gray-300">
-      NADAR 2.0 is a tool for finding specific notes on nostr. 
-      It discovers relays using <a href="https://github.com/nostr-protocol/nips/blob/master/66.md" class="border-b border-gray-700">NIP-66</a>.
-      This is a rewrite by 
-      <a href="https://njump.me/npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx" target="_blank" class="border-b border-gray-700">sandwich</a> 
-      of the <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">original NADAR</a> by 
-      <a href="https://njump.me/npub16ema6x3r8x8pe32lwnsll0krqmy79h5vvap8sdd7q5yhy4q2dv6slt6le9" target="_blank" class="border-b border-gray-700">Thorwegian</a>.
-          </p>
-  </div>
 
-  <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4 rounded-lg p-4">
-    <p class="text-gray-700 dark:text-gray-300">
-      Hint: Add a <code>nevent</code>, <code>naddr</code>, or <code>hex event ID</code> to the path to automatically initiate a search 
-      <a 
-      href="/nevent1qqsyrn5mc5x6wlw624p0qgphpmxzkptd3u47j0quahcm74l0e2cftvqpp4mhxue69uhkummn9ekx7mqpyfmhxue69uhhqatjwpkx2urpvuhx2ue0y5erqur4wfcxcetsv9njuetnqyf8wumn8ghj7ur4wfcxcetsv9njuetnqy0hwumn8ghj7ur4wfcxcetsv9njuetn9acxzcnvdanrw73wvdhk6q3qtfrzlfsyfd9cmgcc229xnpaytcadlqet68ryh453p6k0an0sw4qslpmhr3" 
-      target="_blank" 
-      class="opacity-50 italic border-b border-gray-700">
-        example</a>
-    </p>
-  </div>
 
   <div class="mb-4">
     <p class="text-gray-600">
