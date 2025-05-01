@@ -1763,10 +1763,8 @@ function switchMode(mode: number) {
   activeMode = mode;
   savePreferences();
   
-  // Initialize new mode
-  if (mode === 2 && hasNip07Extension() && !loggedIn) {
-    loginWithExtension();
-  }
+  // We removed the automatic login attempt here to let users explicitly
+  // click the login button when they want to
 }
 
 // Add variables and functions for note batch checking
