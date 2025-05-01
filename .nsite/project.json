@@ -9,12 +9,8 @@
     "wss://nos.lol"
   ],
   "servers": [
-    "https://blossom.hzrd149.com",
     "https://cdn.hzrd149.com",
-    "https://cdn.sovbit.host/",
-    "https://blossom.nostr.hu/",
-    "https://cdn.nostr.hu/",
-    "https://blossom.f7z.io/"
+    "https://cdn.sovbit.host/"
   ],
   "profile": {
     "name": "NADAR 2.0",

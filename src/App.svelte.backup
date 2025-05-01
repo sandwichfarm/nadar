@@ -1,9 +1,8 @@
 <script lang="ts">
 import { onDestroy, onMount } from 'svelte';
-import { NostrFetcher, type NostrEvent } from 'nostr-fetch';
+import { NostrFetcher } from 'nostr-fetch';
 import type { Event, Filter } from 'nostr-tools';
-import { Relay } from 'nostr-tools';
-import { SimplePool } from 'nostr-tools/pool';
+import { Relay, SimplePool } from 'nostr-tools';
 import { nip19 } from 'nostr-tools';
 import { get, writable, type Writable } from 'svelte/store';
 import type { SubCloser } from 'nostr-tools/abstract-pool';
@@ -21,18 +20,11 @@ const DEFAULT_DISCOVERY_RELAYS = [
   'wss://relaypag.es',
   'wss://monitorlizard.nostr1.com'
 ];
-const DEFAULT_USERMETA_RELAYS = [
-  'wss://purplepag.es',
-  'wss://user.kindpag.es',
-  'wss://relay.nostr.band',
-  'wss://relay.damus.io',
-  'wss://nos.lol'
-]
 const DEFAULT_MAX_CONCURRENT_RELAYS = 21;
 const DEFAULT_SOUND_ENABLED = false;
 const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_THEME = 'system'; // 'light', 'dark', or 'system'
-const DEFAULT_DEBUG = true;
+const DEFAULT_DEBUG = false;
 const DEFAULT_ACTIVE_MODE = 1; // Default to Mode 1
 
 // Load preferences from localStorage or use defaults
@@ -44,7 +36,6 @@ let theme = localStorage.getItem('nadar_theme') || DEFAULT_THEME;
 let debug = localStorage.getItem('nadar_debug') === 'true' || DEFAULT_DEBUG;
 let activeMode = parseInt(localStorage.getItem('nadar_active_mode') || DEFAULT_ACTIVE_MODE.toString());
 
-// Types 
 type TargetEvent = {
   type: 'nevent' | 'naddr' | 'hex';
   id?: string;  // For nevent
@@ -52,11 +43,6 @@ type TargetEvent = {
   kind?: number;
   identifier?: string;  // For naddr
   relays?: string[];
-};
-
-// Add a type for notes with expanded property
-type ExpandableNote = Event & {
-  expanded?: boolean;
 };
 
 let loading = false;
@@ -885,269 +871,15 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
 // Mode 2: NIP-07 Extension & NIP-65 variables
 let loggedIn = false;
 let currentPubkey = '';
-let userRelays: Writable<string[]> = writable([]);
-let recentNotes: ExpandableNote[] = [];
+let userRelays: string[] = [];
+let recentNotes: Event[] = [];
 let loadingNotes = false;
 let noteRelayMap: Map<string, Set<string>> = new Map(); // Maps note IDs to the relays they were found on
 let noteSubscriptions: SubCloser[] = [];
-let currentlyCheckingNoteId: string | null = null;
-let totalNotesChecked = 0;
-let isCurrentlyChecking = false;
-let rebroadcastingNoteId: string | null = null;
-let isRebroadcastingAll = false;
-let rebroadcastResults: Map<string, { success: Set<string>, failed: Set<string> }> = new Map();
 
 // Check if NIP-07 extension is available
 function hasNip07Extension(): boolean {
   return typeof window !== 'undefined' && 'nostr' in window;
-}
-
-// Function to rebroadcast a single note to specific relays
-async function rebroadcastNote(note: Event, targetRelays: string[]): Promise<{success: Set<string>, failed: Set<string>}> {
-  if (!targetRelays.length) return { success: new Set(), failed: new Set() };
-  
-  debugLog(`Rebroadcasting note ${note.id} to ${targetRelays.length} relays`);
-  rebroadcastingNoteId = note.id;
-  
-  const successRelays = new Set<string>();
-  const failedRelays = new Set<string>();
-  
-  // Keep track of existing found relays
-  const existingRelays = noteRelayMap.get(note.id) || new Set<string>();
-  
-  // Process relays in batches to avoid overwhelming the browser
-  const MAX_CONCURRENT = Math.min(MAX_CONCURRENT_RELAYS, 20);
-  
-  for (let i = 0; i < targetRelays.length; i += MAX_CONCURRENT) {
-    const batchRelays = targetRelays.slice(i, i + MAX_CONCURRENT);
-    debugLog(`Rebroadcasting to batch of ${batchRelays.length} relays`);
-    
-    const batchPromises = batchRelays.map(async (relayUrl) => {
-      let relay: Relay | undefined;
-      try {
-        // Connect to relay
-        relay = new Relay(relayUrl);
-        await relay.connect();
-        
-        // Publish the note
-        const publishPromise = relay.publish(note);
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Publish timeout')), timeoutMs);
-        });
-        
-        await Promise.race([publishPromise, timeoutPromise]);
-        
-        // If we get here, publish was successful
-        successRelays.add(relayUrl);
-        debugLog(`Successfully rebroadcast note ${note.id} to ${relayUrl}`);
-        
-        return { relayUrl, success: true };
-      } catch (error) {
-        failedRelays.add(relayUrl);
-        debugError(`Failed to rebroadcast note ${note.id} to ${relayUrl}:`, error);
-        return { relayUrl, success: false };
-      } finally {
-        if (relay) {
-          try {
-            relay.close();
-          } catch (error) {
-            debugError(`Error closing relay connection:`, error);
-          }
-        }
-      }
-    });
-    
-    await Promise.allSettled(batchPromises);
-  }
-  
-  // Store results for display
-  rebroadcastResults.set(note.id, { 
-    success: successRelays, 
-    failed: failedRelays 
-  });
-  
-  return { success: successRelays, failed: failedRelays };
-}
-
-// Rebroadcast a specific note to relays it wasn't found on
-async function rebroadcastSingleNote(note: Event) {
-  if (!note || !noteRelayMap.has(note.id)) return;
-  
-  // Find relays where the note isn't present
-  const missingRelays = $userRelays.filter(relay => 
-    !noteRelayMap.get(note.id)?.has(relay)
-  );
-  
-  if (missingRelays.length === 0) {
-    debugLog(`Note ${note.id} already present on all relays`);
-    return;
-  }
-  
-  // Play sound effect
-  if (soundEnabled) {
-    await playRadarSound();
-  }
-  
-  // Get the current relay state before rebroadcasting
-  const existingRelays = new Set(noteRelayMap.get(note.id));
-  
-  // Rebroadcast to missing relays
-  const results = await rebroadcastNote(note, missingRelays);
-  
-  // Play success/failure sound based on results
-  if (soundEnabled) {
-    if (results.success.size > 0) {
-      if (results.failed.size === 0) {
-        await playSuccessSound();
-      } else {
-        await playFoundSound();
-      }
-    } else {
-      await playFailureSound();
-    }
-  }
-  
-  // Ensure we preserve the existing relay mapping
-  if (results.success.size > 0) {
-    // Set current note as being checked and expand it
-    currentlyCheckingNoteId = note.id;
-    isCurrentlyChecking = true;
-    
-    // Find the note in recentNotes and expand it
-    const noteIndex = recentNotes.findIndex(n => n.id === note.id);
-    if (noteIndex >= 0) {
-      recentNotes[noteIndex].expanded = true;
-    }
-    
-    // Reset state for this note
-    foundOnRelays.set(new Set(existingRelays)); // Start with existing
-    checkedRelays.set(new Set());
-    
-    // Set up target event
-    targetEvent = {
-      type: 'hex',
-      id: note.id,
-      relays: $userRelays
-    };
-    
-    // We'll manually add the newly successful relays
-    results.success.forEach(relayUrl => {
-      foundOnRelays.update(relays => {
-        relays.add(relayUrl);
-        return relays;
-      });
-    });
-    
-    // Also check the note against all relays again for verification
-    await checkNoteOnRelays(note.id, $userRelays);
-    
-    // Combine previous relay data with newly found relays
-    const updatedRelays = new Set([...existingRelays, ...get(foundOnRelays)]);
-    noteRelayMap.set(note.id, updatedRelays);
-    
-    // Clean up
-    isCurrentlyChecking = false;
-    currentlyCheckingNoteId = null;
-  }
-  
-  rebroadcastingNoteId = null;
-}
-
-// Rebroadcast all notes to relays they weren't found on
-async function rebroadcastAllNotes() {
-  if (recentNotes.length === 0) return;
-  
-  isRebroadcastingAll = true;
-  
-  try {
-    // Clear previous results
-    rebroadcastResults = new Map();
-    
-    // Save the current relay mappings
-    const savedRelayMaps = new Map<string, Set<string>>();
-    for (const note of recentNotes) {
-      if (noteRelayMap.has(note.id)) {
-        savedRelayMaps.set(note.id, new Set(noteRelayMap.get(note.id)));
-      }
-    }
-    
-    for (const note of recentNotes) {
-      // Find relays where the note isn't present
-      const missingRelays = $userRelays.filter(relay => 
-        !noteRelayMap.get(note.id)?.has(relay)
-      );
-      
-      if (missingRelays.length === 0) {
-        debugLog(`Note ${note.id} already present on all relays`);
-        continue;
-      }
-      
-      // Rebroadcast to missing relays
-      await rebroadcastNote(note, missingRelays);
-      
-      // Small delay between notes
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    
-    // Play success sound when all done
-    if (soundEnabled) {
-      await playSuccessSound();
-    }
-    
-    // Restore saved relay mappings
-    for (const [noteId, relays] of savedRelayMaps.entries()) {
-      noteRelayMap.set(noteId, relays);
-    }
-    
-    // Rescan all notes to update their status
-    debugLog(`Rescanning all notes after rebroadcast`);
-    isSearching = true;
-    
-    // We'll now check all notes against all relays, preserving the existing data
-    for (const note of recentNotes) {
-      // Skip if we don't have this note in the map
-      if (!noteRelayMap.has(note.id)) continue;
-      
-      // Set current note as being checked
-      currentlyCheckingNoteId = note.id;
-      isCurrentlyChecking = true;
-      
-      // Reset search state but start with existing data
-      foundOnRelays.set(new Set(noteRelayMap.get(note.id)));
-      checkedRelays.set(new Set());
-      
-      // Check all relays for this note
-      targetEvent = {
-        type: 'hex',
-        id: note.id,
-        relays: $userRelays
-      };
-      
-      // Check all relays
-      await checkNoteOnRelays(note.id, $userRelays);
-      
-      // Update the note relay map
-      const updatedRelays = new Set([...noteRelayMap.get(note.id) || [], ...get(foundOnRelays)]);
-      noteRelayMap.set(note.id, updatedRelays);
-      
-      // Increment checked notes
-      totalNotesChecked++;
-      
-      // Small delay
-      await new Promise(resolve => setTimeout(resolve, 300));
-    }
-    
-    isSearching = false;
-    searchCompleted = true;
-    
-  } catch (error) {
-    debugError('Error rebroadcasting all notes:', error);
-  } finally {
-    isRebroadcastingAll = false;
-    rebroadcastingNoteId = null;
-    isCurrentlyChecking = false;
-    currentlyCheckingNoteId = null;
-  }
 }
 
 // Login with NIP-07 extension
@@ -1184,73 +916,59 @@ async function loginWithExtension() {
   }
 }
 
-// Fix the fetchUserRelays function syntax
+// Fetch user's relays from kind:10002 events
 async function fetchUserRelays() {
   if (!currentPubkey) return;
   
   debugLog('Fetching relays for pubkey:', currentPubkey);
-  const _userRelays: string[] = [];
-
-  const pool = new SimplePool();
-
+  userRelays = [];
+  
+  const fetcher = NostrFetcher.init();
   try {
-    const sub = pool.subscribeMany(
-      DEFAULT_USERMETA_RELAYS, 
-      [{
-        kinds: [10002],
-        authors: [currentPubkey]
-      }], 
+    // Try to find the most recent kind:10002 event
+    const relayListEvents = await fetcher.fetchLatestEvents(
+      DISCOVERY_RELAYS,
       {
-        onevent: (event: NostrEvent) => {
-          debugLog('Found NIP-65 event:', event);
-            
-          // Extract relay URLs from the event tags
-          for (const tag of event.tags) {
-            if (tag[0] === 'r') {
-              try {
-                const url = new URL(tag[1]).toString();
-                console.log('url', url);
-                // const readPermission = tag[2] !== 'write'; // If not explicitly write-only
-                
-                // if (readPermission && url) {
-                if(url) {
-                  _userRelays.push(normalizeRelayUrl(url));
-                }
-                console.log('userRelays', userRelays);
-              } catch (error) {
-                debugError('Invalid relay URL:', tag[1]);
-              }
-            }
-          }
-          userRelays.set(_userRelays);
-        },
-        oneose: () => {
-          debugLog('EOSE received for relay list');
-          // No relays found after oneose, leave the list empty
-          // Do not fallback to discovered relays as requested
-          if (_userRelays.length === 0) {
-            debugLog('No relays found in NIP-65 event, not using fallback');
+        authors: [currentPubkey],
+        kinds: [10002]
+      },
+      1
+    );
+    
+    if (relayListEvents.length > 0) {
+      const event = relayListEvents[0];
+      debugLog('Found NIP-65 event:', event);
+      
+      // Extract relay URLs from the event tags
+      for (const tag of event.tags) {
+        if (tag[0] === 'r') {
+          const url = tag[1];
+          const readPermission = tag[2] !== 'write'; // If not explicitly write-only
+          
+          if (readPermission && url) {
+            userRelays.push(normalizeRelayUrl(url));
           }
         }
       }
-    );
-    
-    // Set a timeout to close the subscription after 5 seconds
-    setTimeout(() => {
-      try {
-        sub.close();
-      } catch (e) {
-        debugError('Error closing subscription:', e);
-      }
-    }, 5000);
+      
+      debugLog('Extracted relays:', userRelays);
+    } else {
+      debugLog('No kind:10002 events found');
+    }
   } catch (error) {
-    debugError('Error in fetchUserRelays:', error);
+    debugError('Error fetching user relays:', error);
+  }
+  
+  // If we couldn't find any relays, use the discovery relays as fallback
+  if (userRelays.length === 0) {
+    debugLog('Using discovery relays as fallback');
+    userRelays = [...get(foundRelays)];
   }
 }
 
 // Fetch recent notes from user's relays
 async function fetchRecentNotes(limit: number = 20) {
-  if ($userRelays.length === 0) return;
+  if (userRelays.length === 0) return;
   
   loadingNotes = true;
   recentNotes = [];
@@ -1277,81 +995,39 @@ async function fetchRecentNotes(limit: number = 20) {
       url?: string; // URL property that comes from the relay
     };
     
-    debugLog('Fetching recent notes from relays:', $userRelays);
-    
-    // Use individual relay connections to gather notes
-    const allNotes: Record<string, ExpandableNote> = {};
-    const maxRelaysPerBatch = Math.min(MAX_CONCURRENT_RELAYS, 20); // Ensure no more than 20 concurrent relays
-    
-    // Process relays in batches to avoid overwhelming the browser
-    for (let i = 0; i < $userRelays.length; i += maxRelaysPerBatch) {
-      const batchRelays = $userRelays.slice(i, i + maxRelaysPerBatch);
-      debugLog(`Processing relay batch for notes: ${batchRelays.length} relays`);
-      
-      // Set up connections to all relays in this batch
-      const relayConnections: Relay[] = [];
-      const subscriptions: SubCloser[] = [];
-      
-      for (const relayUrl of batchRelays) {
-        try {
-          const relay = new Relay(relayUrl);
-          await relay.connect();
-          relayConnections.push(relay);
+    // Subscribe to recent events from all relays
+    const sub = pool.subscribeMany(
+      userRelays,
+      [{ kinds: [1], limit: limit }],
+      {
+        onevent(event) {
+          // Add to notes if not already there
+          if (!recentNotes.some(e => e.id === event.id)) {
+            recentNotes = [...recentNotes, event];
+          }
           
-          // Create subscription for this relay
-          const sub = relay.subscribe(
-            [{ 
-              kinds: [1],
-              authors: [currentPubkey],
-              limit: limit
-            }],
-            {
-              onevent(event) {
-                debugLog(`Note ${event.id} found on relay ${relayUrl}`);
-                
-                // Add to notes if not already there
-                if (!allNotes[event.id]) {
-                  allNotes[event.id] = {
-                    ...event,
-                    expanded: false
-                  } as ExpandableNote;
-                }
-                
-                // Track which relay this note was found on
-                if (!noteRelayMap.has(event.id)) {
-                  noteRelayMap.set(event.id, new Set());
-                }
-                noteRelayMap.get(event.id)?.add(relayUrl);
-              },
-              oneose() {
-                debugLog(`EOSE received from relay ${relayUrl}`);
-              }
+          // Track which relay this note was found on
+          // The 'this' context in the callback includes the relay URL
+          const relayUrl = (this as unknown as SubHandler).url;
+          if (relayUrl) {
+            if (!noteRelayMap.has(event.id)) {
+              noteRelayMap.set(event.id, new Set());
             }
-          );
-          
-          subscriptions.push(sub);
-          noteSubscriptions.push(sub);
-        } catch (error) {
-          debugError(`Error connecting to relay ${relayUrl}:`, error);
+            noteRelayMap.get(event.id)?.add(relayUrl);
+          }
+        },
+        oneose() {
+          // The 'this' context in the callback includes the relay URL
+          const url = (this as unknown as SubHandler).url;
+          debugLog(`EOSE received from relay ${url}`);
         }
       }
-      
-      // Wait for a moment to let subscriptions collect data
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      
-      // Close connections for this batch
-      for (const relay of relayConnections) {
-        try {
-          relay.close();
-        } catch (error) {
-          debugError(`Error closing relay connection:`, error);
-        }
-      }
-    }
+    );
     
-    // Convert collected notes to array and sort
-    recentNotes = Object.values(allNotes).sort((a, b) => b.created_at - a.created_at);
-    debugLog(`Found ${recentNotes.length} notes from ${$userRelays.length} relays`);
+    noteSubscriptions.push(sub);
+    
+    // Sort notes by creation time (newest first)
+    recentNotes.sort((a, b) => b.created_at - a.created_at);
     
   } catch (error) {
     debugError('Error fetching recent notes:', error);
@@ -1360,154 +1036,23 @@ async function fetchRecentNotes(limit: number = 20) {
   }
 }
 
-// Check a specific note against a list of relays (similar to Mode 1 approach)
-async function checkNoteOnRelays(noteId: string, relayUrls: string[]) {
-  debugLog(`Checking note ${noteId} on ${relayUrls.length} relays`);
+// Check relay availability for a specific note
+async function checkNoteRelays(noteId: string) {
+  if (!noteId || userRelays.length === 0) return;
   
-  // Clean up any existing connections first
-  await cleanupActiveConnections();
+  // Reset search state
+  foundOnRelays.set(new Set());
+  checkedRelays.set(new Set());
   
-  // Create the filter for this note
-  const filter: Filter = { ids: [noteId] };
-
-  // Process relays in batches to avoid overwhelming the browser
-  const MAX_CONCURRENT = Math.min(MAX_CONCURRENT_RELAYS, 20); // Ensure no more than 20 concurrent relays
+  // Create target event from note ID
+  targetEvent = {
+    type: 'hex',
+    id: noteId,
+    relays: []
+  };
   
-  for (let i = 0; i < relayUrls.length && isSearching; i += MAX_CONCURRENT) {
-    if (isPaused) {
-      await new Promise(resolve => {
-        const checkPause = setInterval(() => {
-          if (!isPaused) {
-            clearInterval(checkPause);
-            resolve(undefined);
-          }
-        }, 100);
-      });
-    }
-
-    if (!isSearching) break;
-
-    // Get the current batch of relays
-    const currentBatch = relayUrls.slice(i, i + MAX_CONCURRENT);
-    debugLog(`Processing relay batch for note ${noteId}: ${currentBatch.length} relays`);
-    
-    // Track if we've found a relay in this batch (for sound effects)
-    let foundRelayInCurrentBatch = false;
-    
-    // Process each relay in the batch
-    const batchPromises = currentBatch.map(async (relayUrl, index) => {
-      if (!isSearching) return null;
-
-      // Add a small delay between connection attempts
-      await new Promise(resolve => setTimeout(resolve, index * 50));
-      
-      let relay: Relay | undefined;
-      try {
-        relay = new Relay(relayUrl);
-        activeRelays.push(relay);
-        
-        // Connect to the relay
-        const connectPromise = relay.connect();
-        const connectTimeout = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Connection timeout')), 5000);
-        });
-        
-        try {
-          await Promise.race([connectPromise, connectTimeout]);
-        } catch (err) {
-          debugError(`Connection failed to relay ${relayUrl}:`, err);
-          throw err;
-        }
-        
-        // Set up a timeout for the relay query
-        const timeoutPromise = new Promise<null>((resolve) => {
-          setTimeout(() => {
-            debugLog(`Timeout reached for relay ${relayUrl}`);
-            resolve(null);
-          }, timeoutMs);
-        });
-        
-        // Create a promise that resolves when we find the event on this relay
-        const findPromise = new Promise<boolean>((resolve) => {
-          if (!relay) {
-            return resolve(false);
-          }
-          
-          const sub = relay.subscribe([filter], {
-            onevent: (event) => {
-              debugLog(`Note ${noteId} found on relay ${relayUrl}`);
-              
-              foundOnRelays.update(relays => {
-                relays.add(relayUrl);
-                return relays;
-              });
-              
-              // Also update the noteRelayMap directly
-              if (!noteRelayMap.has(noteId)) {
-                noteRelayMap.set(noteId, new Set());
-              }
-              noteRelayMap.get(noteId)?.add(relayUrl);
-              
-              // Play click sound when a relay is found
-              if (soundEnabled && !foundRelayInCurrentBatch) {
-                foundRelayInCurrentBatch = true;
-                playFoundSound();
-              }
-              
-              sub.close();
-              resolve(true);
-            },
-            oneose: () => {
-              debugLog(`EOSE received from relay ${relayUrl} for note ${noteId}`);
-              sub.close();
-              resolve(false);
-            }
-          });
-          
-          activeSubscriptions.push(sub);
-        });
-        
-        // Race between finding the event and timing out
-        const found = await Promise.race([findPromise, timeoutPromise]);
-        
-        // Mark the relay as checked
-        checkedRelays.update(relays => {
-          relays.add(relayUrl);
-          return relays;
-        });
-        
-        return { relayUrl, success: true, found: !!found };
-      } catch (error) {
-        debugError(`Error with relay ${relayUrl}:`, error);
-        
-        // Ensure the relay is still marked as checked even if there was an error
-        checkedRelays.update(relays => {
-          relays.add(relayUrl);
-          return relays;
-        });
-        
-        return { relayUrl, success: false, found: false };
-      } finally {
-        if (relay) {
-          try {
-            relay.close();
-            const index = activeRelays.indexOf(relay);
-            if (index > -1) {
-              activeRelays.splice(index, 1);
-            }
-          } catch (error) {
-            debugError(`Error closing relay ${relayUrl}:`, error);
-          }
-        }
-      }
-    });
-
-    // Wait for all batch promises to complete
-    await Promise.allSettled(batchPromises);
-    
-    // Add a small delay between batches
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
+  // Start the search
+  findEventOnRelays();
 }
 
 // Switch between modes
@@ -1536,126 +1081,73 @@ function switchMode(mode: number) {
 // Add variables and functions for note batch checking
 let noteFetchCount = 20; // Default number of notes to fetch
 
-// Update the fetchAndCheckNotes function to properly check relays
+// Function to fetch notes and then check them all in batches
 async function fetchAndCheckNotes(limit: number = 20) {
-  if ($userRelays.length === 0) return;
+  if (userRelays.length === 0) return;
   
   loadingNotes = true;
   recentNotes = [];
   noteRelayMap.clear();
-  totalNotesChecked = 0;
-  currentlyCheckingNoteId = null;
-  isCurrentlyChecking = false;
   
   try {
     // First fetch the notes
     await fetchRecentNotes(limit);
     
-    // Then check all notes against each relay
+    // Then check all notes in batches
     if (recentNotes.length > 0) {
-      debugLog(`Found ${recentNotes.length} notes, checking them on all relays`);
-      isSearching = true;
       await checkAllNotesInBatches();
     }
   } catch (error) {
     debugError('Error in fetch and check notes:', error);
   } finally {
     loadingNotes = false;
-    currentlyCheckingNoteId = null;
-    isCurrentlyChecking = false;
   }
 }
 
-// Check all notes in batches of 5
+// Check all notes in batches of 10
 async function checkAllNotesInBatches() {
-  if (recentNotes.length === 0 || $userRelays.length === 0) return;
+  if (recentNotes.length === 0 || userRelays.length === 0) return;
   
-  const BATCH_SIZE = 1; // Process 1 note at a time for better UX
+  const BATCH_SIZE = 10;
   const batchCount = Math.ceil(recentNotes.length / BATCH_SIZE);
   
   isSearching = true;
-  searchStartTime = Date.now();
   
   try {
-    for (let batchIndex = 0; batchIndex < batchCount && isSearching; batchIndex++) {
+    for (let batchIndex = 0; batchIndex < batchCount; batchIndex++) {
       // Get the current batch of notes
       const noteBatch = recentNotes.slice(batchIndex * BATCH_SIZE, (batchIndex + 1) * BATCH_SIZE);
       
-      // Process each note in the batch
-      for (const note of noteBatch) {
-        if (!isSearching) break;
-        
-        debugLog(`Processing note ${note.id}`);
-        
-        // Set current note as being checked and expand it
-        currentlyCheckingNoteId = note.id;
-        isCurrentlyChecking = true;
-        note.expanded = true;
-        
-        // Play the radar sound when starting to check a new note
-        if (soundEnabled) {
-          await playRadarSound();
-        }
-        
-        // Set up the target event for this note
-        targetEvent = {
-          type: 'hex',
-          id: note.id,
-          relays: $userRelays
-        };
-        
-        // Reset state for this note
-        foundOnRelays.set(new Set());
-        checkedRelays.set(new Set());
-        
-        // Check all relays for this note individually (similar to findEventOnRelays but targeted)
-        await checkNoteOnRelays(note.id, $userRelays);
-        
-        // Ensure noteRelayMap is correctly updated from foundOnRelays
-        noteRelayMap.set(note.id, new Set(get(foundOnRelays)));
-        
-        // Increment the number of checked notes
-        totalNotesChecked++;
-        
-        // Play success sound if note was found on all relays, otherwise play partial success sound
-        if (soundEnabled) {
-          const foundRelaysCount = get(foundOnRelays).size;
-          if (foundRelaysCount === $userRelays.length) {
-            await playSuccessSound();
-          } else if (foundRelaysCount > 0) {
-            await playFoundSound();
-          } else {
-            await playFailureSound();
-          }
-        }
-        
-        // Keep note expanded for a moment so user can see the results
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Collapse the note if not the last one
-        if (batchIndex < batchCount - 1) {
-          note.expanded = false;
-        }
-        
-        isCurrentlyChecking = false;
-      }
+      // Check all notes in this batch simultaneously
+      await Promise.all(noteBatch.map(note => checkNoteRelays(note.id)));
     }
   } catch (error) {
     debugError('Error checking notes in batches:', error);
   } finally {
     isSearching = false;
-    searchCompleted = true;
-    searchDuration = (Date.now() - searchStartTime) / 1000;
-    currentlyCheckingNoteId = null;
-    isCurrentlyChecking = false;
   }
 }
 
-$: MODE = activeMode;
-
+// Update the Mode Switcher Tabs to disable them during active searches
+<div class="flex mb-6 border-b dark:border-gray-700">
+  <button
+    class="px-4 py-2 font-medium {activeMode === 1 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400' : 'text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400'} disabled:opacity-50 disabled:cursor-not-allowed"
+    on:click={() => switchMode(1)}
+    disabled={isSearching || loadingNotes}
+  >
+    Find Note by ID
+  </button>
+  <button
+    class="px-4 py-2 font-medium {activeMode === 2 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400' : 'text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400'} disabled:opacity-50 disabled:cursor-not-allowed"
+    on:click={() => switchMode(2)}
+    disabled={isSearching || loadingNotes}
+  >
+    Check Your Notes
+  </button>
+</div>
 </script>
 
-<div class="min-h-screen w-full bg-white dark:bg-gray-900 pb-20">
+<div class="min-h-screen w-full bg-white dark:bg-gray-900">
 <main class="container mx-auto p-4 relative dark:bg-gray-900 dark:text-white min-h-screen">
   <div class="flex flex-col sm:flex-row items-center gap-4 mb-4">
     <div class="flex items-center gap-4">
@@ -1770,11 +1262,10 @@ $: MODE = activeMode;
         
         <div class="space-y-4">
           <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" for="discoveryRelays">
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               NIP-66 Discovery Relays
             </label>
             <textarea
-              id="discoveryRelays"
               class="w-full h-24 p-2 border rounded font-mono text-sm dark:bg-gray-800 dark:border-gray-700 dark:text-white disabled:opacity-75 disabled:bg-gray-100 dark:disabled:bg-gray-900"
               bind:value={discoveryRelaysText}
               disabled={isSearching}
@@ -1799,12 +1290,11 @@ $: MODE = activeMode;
           </div>
 
           <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" for="maxConcurrentRelays">
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Max Concurrent Relays
             </label>
             <input
               type="number"
-              id="maxConcurrentRelays"
               min="1"
               max="100"
               class="w-full p-2 border rounded dark:bg-gray-800 dark:border-gray-700 dark:text-white"
@@ -1818,12 +1308,11 @@ $: MODE = activeMode;
           </div>
 
           <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" for="relayTimeout">
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Relay Query Timeout (ms)
             </label>
             <input
               type="number"
-              id="relayTimeout"
               min="1000"
               max="30000"
               step="1000"
@@ -1871,11 +1360,10 @@ $: MODE = activeMode;
           </div>
 
           <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" for="themeSelect">
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Theme
             </label>
             <select
-              id="themeSelect"
               class="w-full p-2 border rounded bg-white dark:bg-gray-800 dark:border-gray-700 dark:text-white"
               bind:value={theme}
               on:change={() => {
@@ -1982,9 +1470,9 @@ $: MODE = activeMode;
         Hint: Add a <code>nevent</code>, <code>naddr</code>, or <code>hex event ID</code> to the path to automatically initiate a search 
         <a 
         href="/nevent1qqsyrn5mc5x6wlw624p0qgphpmxzkptd3u47j0quahcm74l0e2cftvqpp4mhxue69uhkummn9ekx7mqpyfmhxue69uhhqatjwpkx2urpvuhx2ue0y5erqur4wfcxcetsv9njuetnqyf8wumn8ghj7ur4wfcxcetsv9njuetnqy0hwumn8ghj7ur4wfcxcetsv9njuetn9acxzcnvdanrw73wvdhk6q3qtfrzlfsyfd9cmgcc229xnpaytcadlqet68ryh453p6k0an0sw4qslpmhr3" 
-      target="_blank" 
-      class="opacity-50 italic border-b border-gray-700">
-        example</a>
+        target="_blank" 
+        class="opacity-50 italic border-b border-gray-700">
+          example</a>
       </p>
     </div>
 
@@ -2153,7 +1641,7 @@ $: MODE = activeMode;
     {/if}
   {:else if activeMode === 2}
     <!-- MODE 2: Check Your Notes -->
-    <div class="mb-4">
+    <div class="mb-8">
       {#if !hasNip07Extension()}
         <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-4">
           <div class="flex items-center gap-2">
@@ -2179,301 +1667,97 @@ $: MODE = activeMode;
           Login with Extension
         </button>
       {:else}
-        <!-- User Info & Controls -->
-        <div class="bg-gray-800/10 dark:bg-gray-700/10 rounded-lg p-4 mb-4">
-          <div class="flex items-center justify-between mb-3">
-            <div>
-              <span class="text-sm text-gray-700 dark:text-gray-300">Logged in as:</span>
-              <span class="ml-2 font-mono text-sm text-gray-800 dark:text-gray-200">
-                {currentPubkey ? `${currentPubkey.substring(0, 8)}...${currentPubkey.substring(currentPubkey.length - 8)}` : 'Not logged in'}
-              </span>
+        <div class="flex flex-col gap-4">
+          <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span class="font-mono text-blue-800 dark:text-blue-300 text-sm truncate max-w-[200px] sm:max-w-xs">
+                  {currentPubkey ? `${currentPubkey.substring(0, 8)}...${currentPubkey.substring(currentPubkey.length - 8)}` : 'Not logged in'}
+                </span>
+              </div>
+              <button
+                class="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+                on:click={fetchUserRelays}
+              >
+                Refresh Relays
+              </button>
+            </div>
+            <div class="mt-4">
+              <span class="text-blue-800 dark:text-blue-300 font-semibold">Your Relays ({userRelays.length}):</span>
+              <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-1">
+                {#each userRelays as relay}
+                  <div class="text-xs font-mono truncate bg-blue-100 dark:bg-blue-900/30 p-1.5 rounded">
+                    {relay}
+                  </div>
+                {/each}
+              </div>
+            </div>
+          </div>
+          
+          <div class="flex gap-2 items-center">
+            <div class="flex-1">
+              <label for="noteCount" class="block text-sm font-medium mb-1">Notes to fetch:</label>
+              <input 
+                id="noteCount"
+                type="number" 
+                class="w-full p-2 border rounded dark:bg-gray-800 dark:border-gray-700 dark:text-white" 
+                min="5" 
+                max="100" 
+                step="5" 
+                bind:value={noteFetchCount}
+              />
             </div>
             <button
-              class="px-3 py-1 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded"
-              on:click={fetchUserRelays}
+              class="flex-none p-3 bg-green-500 hover:bg-green-600 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              on:click={() => fetchAndCheckNotes(noteFetchCount)}
+              disabled={loadingNotes || userRelays.length === 0 || isSearching}
             >
-              Refresh Relays
+              {loadingNotes ? 'Loading...' : 'Fetch & Check Notes'}
             </button>
           </div>
           
-          <div class="flex justify-between items-center mb-3">
-            <span class="text-gray-700 dark:text-gray-300 font-semibold text-sm">Your Relays ({$userRelays.length})</span>
-            
-            <div class="flex items-center gap-2">
-              <label for="noteCountInput" class="text-xs text-gray-600 dark:text-gray-400">Notes to fetch:</label>
-              <input
-                id="noteCountInput"
-                type="number"
-                class="w-16 p-1 text-sm border rounded dark:bg-gray-800 dark:border-gray-700 dark:text-white"
-                min="5"
-                max="100"
-                step="5"
-                bind:value={noteFetchCount}
-              />
-              <button
-                class="px-3 py-1 text-sm bg-green-500 hover:bg-green-600 text-white rounded disabled:opacity-50"
-                on:click={() => fetchAndCheckNotes(noteFetchCount)}
-                disabled={loadingNotes || $userRelays.length === 0 || isSearching}
-              >
-                {loadingNotes || isSearching ? 'Working...' : 'Fetch & Check'}
-              </button>
-            </div>
-          </div>
-          
-          <!-- Rebroadcast all button (only shown when notes are loaded and not currently checking) -->
-          {#if recentNotes.length > 0 && !isSearching && !isRebroadcastingAll}
-            <div class="mt-2 flex justify-end">
-              <button
-                class="px-3 py-1 text-sm bg-purple-500 hover:bg-purple-600 text-white rounded flex items-center gap-1 disabled:opacity-50"
-                on:click={rebroadcastAllNotes}
-                disabled={loadingNotes || isSearching || isRebroadcastingAll}
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-                </svg>
-                Rebroadcast All Missing Notes
-              </button>
-            </div>
-          {/if}
-          
-          {#if isRebroadcastingAll}
-            <div class="mt-2 bg-purple-50 dark:bg-purple-900/30 p-2 rounded flex items-center gap-2">
-              <svg class="animate-spin h-4 w-4 text-purple-700 dark:text-purple-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              <span class="text-sm text-purple-800 dark:text-purple-300">Rebroadcasting notes to relays... {rebroadcastingNoteId ? `Currently: ${rebroadcastingNoteId.substring(0, 8)}...` : ''}</span>
-            </div>
-          {/if}
-          
-          <div class="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-1">
-            {#each $userRelays as relay}
-              <div class="text-xs font-mono truncate bg-gray-100 dark:bg-gray-800 p-1 rounded">
-                {relay}
+          {#if recentNotes.length > 0}
+            <div class="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg shadow-sm">
+              <div class="p-3 border-b dark:border-gray-700 font-medium">
+                Recent Notes ({recentNotes.length})
               </div>
-            {/each}
-          </div>
-        </div>
-        
-        {#if isSearching}
-          <!-- Search Progress Display - similar to Mode 1 -->
-          <div class="mb-4">
-            <h2 class="text-xl font-semibold mb-2">Checking Notes on Relays:</h2>
-            <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 space-y-2">
-              <div class="grid grid-cols-2 gap-2">
-                <div>
-                  <span class="text-gray-600 dark:text-gray-400">Total Notes:</span>
-                  <span class="ml-2">{recentNotes.length}</span>
-                </div>
-                <div>
-                  <span class="text-gray-600 dark:text-gray-400">Your Relays:</span>
-                  <span class="ml-2">{$userRelays.length}</span>
-                </div>
-                <div>
-                  <span class="text-gray-600 dark:text-gray-400">Progress:</span>
-                  <span class="ml-2">{noteRelayMap.size}/{recentNotes.length} notes</span>
-                </div>
-                <div>
-                  <span class="text-gray-600 dark:text-gray-400">Current Note:</span>
-                  <span class="ml-2 font-mono">{targetEvent?.id ? targetEvent.id.substring(0, 8) + '...' : 'None'}</span>
-                </div>
-              </div>
-              
-              {#if targetEvent}
-                <div class="mt-2">
-                  <div class="flex items-center gap-2 mb-2">
-                    <div class="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
-                      <div 
-                        class="h-full bg-blue-500 transition-all duration-300"
-                        style="width: {(noteRelayMap.size / recentNotes.length) * 100}%"
-                      ></div>
-                    </div>
-                    <span class="text-sm text-gray-600">
-                      {noteRelayMap.size}/{recentNotes.length} checked
-                    </span>
-                  </div>
-                </div>
-              {/if}
-            </div>
-          </div>
-        {/if}
-        
-        {#if searchCompleted && recentNotes.length > 0}
-          <!-- Final Report - after all checks are done -->
-          <div class="mb-4">
-            <div class="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4 mb-4">
-              <div class="flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-green-600 dark:text-green-400">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <h2 class="text-xl font-semibold text-green-800 dark:text-green-400">Check Complete!</h2>
-              </div>
-              <div class="mt-2 text-green-700 dark:text-green-300">
-                Checked {recentNotes.length} notes on {$userRelays.length} relays in {searchDuration.toFixed(1)} seconds
-              </div>
-            </div>
-            
-            <!-- Summary Statistics -->
-            <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 mb-4">
-              <h3 class="text-lg font-semibold mb-2">Results Summary:</h3>
-              <div class="grid grid-cols-2 gap-4">
-                <div>
-                  <span class="text-gray-600 dark:text-gray-400">Total Notes:</span>
-                  <span class="ml-2 font-semibold">{recentNotes.length}</span>
-                </div>
-                <div>
-                  <span class="text-gray-600 dark:text-gray-400">Relays Checked:</span>
-                  <span class="ml-2 font-semibold">{$userRelays.length}</span>
-                </div>
-                <div>
-                  <span class="text-gray-600 dark:text-gray-400">Fully Synced Notes:</span>
-                  <span class="ml-2 font-semibold">
-                    {recentNotes.filter(note => noteRelayMap.get(note.id)?.size === $userRelays.length).length}
-                  </span>
-                </div>
-                <div>
-                  <span class="text-gray-600 dark:text-gray-400">Average Coverage:</span>
-                  <span class="ml-2 font-semibold">
-                    {(recentNotes.reduce((acc, note) => acc + (noteRelayMap.get(note.id)?.size || 0), 0) / (recentNotes.length * $userRelays.length) * 100).toFixed(1)}%
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-        {/if}
-        
-        <!-- Notes Display -->
-        {#if recentNotes.length > 0}
-          <div class="bg-gray-50 dark:bg-gray-800 border dark:border-gray-700 rounded-lg shadow-sm mb-4">
-            <div class="p-3 border-b dark:border-gray-700 font-medium flex justify-between items-center">
-              <span>Notes ({recentNotes.length})</span>
-            </div>
-            <div class="divide-y dark:divide-gray-700">
-              {#each recentNotes as note}
-                {@const relayCount = noteRelayMap.get(note.id)?.size || 0}
-                {@const relayPercentage = Math.round((relayCount / $userRelays.length) * 100)}
-                {@const statusColor = relayPercentage === 100 ? 'bg-green-500' : 
-                                     relayPercentage > 66 ? 'bg-yellow-500' : 
-                                     relayPercentage > 33 ? 'bg-orange-500' : 'bg-red-500'}
-                {@const isChecking = currentlyCheckingNoteId === note.id}
-                {@const isRebroadcasting = rebroadcastingNoteId === note.id}
-                {@const rebroadcastResult = rebroadcastResults.get(note.id)}
-                
-                <div class="p-2.5 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-all duration-300 {isChecking ? 'bg-blue-50 dark:bg-blue-900/30 border-l-4 border-blue-500' : isRebroadcasting ? 'bg-purple-50 dark:bg-purple-900/30 border-l-4 border-purple-500' : ''}">
-                  <div class="flex justify-between items-center mb-1.5">
-                    <div class="font-mono text-xs text-gray-500 dark:text-gray-400 flex items-center">
-                      <span class="mr-2">{note.id.substring(0, 8)}...</span>
-                      <span class="text-xs text-gray-400 dark:text-gray-500">{new Date(note.created_at * 1000).toLocaleString()}</span>
-                      {#if isChecking}
-                        <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">
-                          <svg class="animate-spin -ml-0.5 mr-1.5 h-2 w-2 text-blue-700 dark:text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                          </svg>
-                          Checking
-                        </span>
-                      {/if}
-                      {#if isRebroadcasting}
-                        <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-300">
-                          <svg class="animate-spin -ml-0.5 mr-1.5 h-2 w-2 text-purple-700 dark:text-purple-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                          </svg>
-                          Rebroadcasting
-                        </span>
-                      {/if}
-                    </div>
-                    <div class="flex items-center gap-1.5">
-                      <div class="flex items-center space-x-1">
-                        <div class="w-2 h-2 rounded-full {isChecking ? 'animate-pulse bg-blue-500' : isRebroadcasting ? 'animate-pulse bg-purple-500' : statusColor}"></div>
-                        <span class="text-xs font-medium">
-                          {relayCount}/{$userRelays.length} relays
-                        </span>
+              <div class="divide-y dark:divide-gray-700">
+                {#each recentNotes as note}
+                  <div class="p-3 hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                    <div class="flex justify-between">
+                      <div class="font-mono text-xs text-gray-500 dark:text-gray-400">
+                        {note.id.substring(0, 10)}...
                       </div>
-                      
-                      {#if relayCount < $userRelays.length && !isSearching && !isRebroadcastingAll && !isRebroadcasting}
-                        <button
-                          class="text-xs px-1.5 py-0.5 bg-purple-200 dark:bg-purple-700 hover:bg-purple-300 dark:hover:bg-purple-600 rounded flex items-center gap-0.5"
-                          on:click={() => rebroadcastSingleNote(note)}
-                          title="Rebroadcast to missing relays"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-                          </svg>
-                          Send
-                        </button>
-                      {/if}
-                      
+                      <div class="text-xs text-gray-500 dark:text-gray-400">
+                        {new Date(note.created_at * 1000).toLocaleString()}
+                      </div>
+                    </div>
+                    <div class="mt-1">
+                      {note.content.substring(0, 150)}
+                      {note.content.length > 150 ? '...' : ''}
+                    </div>
+                    <div class="mt-2 flex gap-2">
                       <button
-                        class="text-xs px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded"
-                        on:click={() => note.expanded = !note.expanded}
-                        disabled={isCurrentlyChecking && note.id !== currentlyCheckingNoteId}
+                        class="px-3 py-1 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded"
+                        on:click={() => checkNoteRelays(note.id)}
                       >
-                        {note.expanded ? 'Hide' : 'Details'}
+                        Check Relays
                       </button>
-                    </div>
-                  </div>
-                  
-                  <div class="mt-1 text-sm line-clamp-2 {isChecking ? 'text-blue-800 dark:text-blue-300 font-medium' : isRebroadcasting ? 'text-purple-800 dark:text-purple-300 font-medium' : ''}">
-                    {note.content.substring(0, 150)}
-                    {note.content.length > 150 ? '...' : ''}
-                  </div>
-                  
-                  {#if rebroadcastResult && (rebroadcastResult.success.size > 0 || rebroadcastResult.failed.size > 0)}
-                    <div class="mt-1 text-xs">
-                      {#if rebroadcastResult.success.size > 0}
-                        <span class="text-green-600 dark:text-green-400">Rebroadcast to {rebroadcastResult.success.size} relay{rebroadcastResult.success.size !== 1 ? 's' : ''}</span>
-                      {/if}
-                      {#if rebroadcastResult.failed.size > 0}
-                        <span class="text-red-600 dark:text-red-400 ml-2">Failed on {rebroadcastResult.failed.size} relay{rebroadcastResult.failed.size !== 1 ? 's' : ''}</span>
-                      {/if}
-                    </div>
-                  {/if}
-                  
-                  {#if note.expanded}
-                    <div class="mt-2 bg-gray-100 dark:bg-gray-800 p-2 rounded-md {isChecking ? 'border border-blue-300 dark:border-blue-700' : isRebroadcasting ? 'border border-purple-300 dark:border-purple-700' : ''}">
-                      <div class="text-xs font-medium mb-1 flex justify-between">
-                        <span>Relay Status:</span>
-                        {#if isChecking}
-                          <span class="text-blue-600 dark:text-blue-400 animate-pulse">Scanning relays...</span>
-                        {/if}
-                        {#if isRebroadcasting}
-                          <span class="text-purple-600 dark:text-purple-400 animate-pulse">Rebroadcasting...</span>
-                        {/if}
-                      </div>
-                      <div class="grid grid-cols-1 sm:grid-cols-2 gap-1">
-                        {#each $userRelays as relay}
-                          {@const isFound = noteRelayMap.get(note.id)?.has(relay) || false}
-                          {@const isPending = isChecking && !get(checkedRelays).has(relay)}
-                          {@const isRebroadcastingToRelay = isRebroadcasting && !isFound}
-                          <div class="flex items-center gap-1 text-xs p-1 rounded 
-                            {isFound ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 
-                             isPending ? 'bg-gray-50 dark:bg-gray-900 text-gray-500 dark:text-gray-400' : 
-                             isRebroadcastingToRelay ? 'bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400' :
-                             'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400'}">
-                            {#if isPending}
-                              <div class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse"></div>
-                            {:else if isRebroadcastingToRelay}
-                              <div class="w-1.5 h-1.5 rounded-full bg-purple-500 animate-pulse"></div>
-                            {:else}
-                              <div class="w-1.5 h-1.5 rounded-full {isFound ? 'bg-green-500' : 'bg-red-500'}"></div>
-                            {/if}
-                            <span class="font-mono truncate">{relay}</span>
-                          </div>
-                        {/each}
+                      <div class="text-xs text-gray-500 dark:text-gray-400 flex items-center">
+                        Found on: {noteRelayMap.get(note.id)?.size || 0} relays
                       </div>
                     </div>
-                  {/if}
-                </div>
-              {/each}
+                  </div>
+                {/each}
+              </div>
             </div>
-          </div>
-        {/if}
+          {/if}
+        </div>
       {/if}
     </div>
   {/if}
 
-  {#if $foundOnRelays.size > 0 && 0 && activeMode === 1}
+  {#if $foundOnRelays.size > 0}
     <div class="mb-4">
       <h2 class="text-xl font-semibold mb-2">Found on {$foundOnRelays.size} relays:</h2>
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
@@ -2516,37 +1800,6 @@ $: MODE = activeMode;
           >
             JSON array
           </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-
-  <!-- Keep progress visible at bottom of screen -->
-  {#if isSearching && recentNotes.length > 0}
-    {@const currentNote = currentlyCheckingNoteId ? recentNotes.find(note => note.id === currentlyCheckingNoteId) : null}
-    {@const currentRelayCount = currentlyCheckingNoteId && noteRelayMap.has(currentlyCheckingNoteId) 
-      ? noteRelayMap.get(currentlyCheckingNoteId)?.size || 0 
-      : 0}
-    <div class="fixed bottom-0 left-0 right-0 bg-blue-50 dark:bg-blue-900/70 p-2 shadow-lg border-t border-blue-200 dark:border-blue-800 z-10">
-      <div class="container mx-auto max-w-3xl">
-        <div class="flex items-center justify-between">
-          <div class="font-medium text-blue-800 dark:text-blue-300">
-            Note {totalNotesChecked}/{recentNotes.length}
-          </div>
-          <div class="text-sm text-blue-700 dark:text-blue-400">
-            {#if currentlyCheckingNoteId}
-              Checking: {currentlyCheckingNoteId.substring(0, 8)}...
-            {/if}
-            
-            {#if get(checkedRelays).size > 0 && $userRelays.length > 0}
-              <span class="text-xs font-medium">
-                Relay check: {get(checkedRelays).size % $userRelays.length || $userRelays.length}/{$userRelays.length}
-              </span>
-            {/if}
-          </div>
-        </div>
-        <div class="w-full bg-blue-200 dark:bg-blue-800 h-1 mt-2 rounded-full">
-          <div class="bg-blue-500 h-1 rounded-full" style="width:{(totalNotesChecked / recentNotes.length * 100)}%"></div>
         </div>
       </div>
     </div>
