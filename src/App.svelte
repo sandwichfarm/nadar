@@ -893,10 +893,201 @@ let noteSubscriptions: SubCloser[] = [];
 let currentlyCheckingNoteId: string | null = null;
 let totalNotesChecked = 0;
 let isCurrentlyChecking = false;
+let rebroadcastingNoteId: string | null = null;
+let isRebroadcastingAll = false;
+let rebroadcastResults: Map<string, { success: Set<string>, failed: Set<string> }> = new Map();
 
 // Check if NIP-07 extension is available
 function hasNip07Extension(): boolean {
   return typeof window !== 'undefined' && 'nostr' in window;
+}
+
+// Function to rebroadcast a single note to specific relays
+async function rebroadcastNote(note: Event, targetRelays: string[]): Promise<{success: Set<string>, failed: Set<string>}> {
+  if (!targetRelays.length) return { success: new Set(), failed: new Set() };
+  
+  debugLog(`Rebroadcasting note ${note.id} to ${targetRelays.length} relays`);
+  rebroadcastingNoteId = note.id;
+  
+  const successRelays = new Set<string>();
+  const failedRelays = new Set<string>();
+  
+  // Process relays in batches to avoid overwhelming the browser
+  const MAX_CONCURRENT = Math.min(MAX_CONCURRENT_RELAYS, 20);
+  
+  for (let i = 0; i < targetRelays.length; i += MAX_CONCURRENT) {
+    const batchRelays = targetRelays.slice(i, i + MAX_CONCURRENT);
+    debugLog(`Rebroadcasting to batch of ${batchRelays.length} relays`);
+    
+    const batchPromises = batchRelays.map(async (relayUrl) => {
+      let relay: Relay | undefined;
+      try {
+        // Connect to relay
+        relay = new Relay(relayUrl);
+        await relay.connect();
+        
+        // Publish the note
+        const publishPromise = relay.publish(note);
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Publish timeout')), timeoutMs);
+        });
+        
+        await Promise.race([publishPromise, timeoutPromise]);
+        
+        // If we get here, publish was successful
+        successRelays.add(relayUrl);
+        debugLog(`Successfully rebroadcast note ${note.id} to ${relayUrl}`);
+        
+        // Update note relay map
+        if (!noteRelayMap.has(note.id)) {
+          noteRelayMap.set(note.id, new Set());
+        }
+        noteRelayMap.get(note.id)?.add(relayUrl);
+        
+        return { relayUrl, success: true };
+      } catch (error) {
+        failedRelays.add(relayUrl);
+        debugError(`Failed to rebroadcast note ${note.id} to ${relayUrl}:`, error);
+        return { relayUrl, success: false };
+      } finally {
+        if (relay) {
+          try {
+            relay.close();
+          } catch (error) {
+            debugError(`Error closing relay connection:`, error);
+          }
+        }
+      }
+    });
+    
+    await Promise.allSettled(batchPromises);
+  }
+  
+  // Store results for display
+  rebroadcastResults.set(note.id, { 
+    success: successRelays, 
+    failed: failedRelays 
+  });
+  
+  return { success: successRelays, failed: failedRelays };
+}
+
+// Rebroadcast a specific note to relays it wasn't found on
+async function rebroadcastSingleNote(note: Event) {
+  if (!note || !noteRelayMap.has(note.id)) return;
+  
+  // Find relays where the note isn't present
+  const missingRelays = $userRelays.filter(relay => 
+    !noteRelayMap.get(note.id)?.has(relay)
+  );
+  
+  if (missingRelays.length === 0) {
+    debugLog(`Note ${note.id} already present on all relays`);
+    return;
+  }
+  
+  // Play sound effect
+  if (soundEnabled) {
+    await playRadarSound();
+  }
+  
+  // Rebroadcast to missing relays
+  const results = await rebroadcastNote(note, missingRelays);
+  
+  // Play success/failure sound based on results
+  if (soundEnabled) {
+    if (results.success.size > 0) {
+      if (results.failed.size === 0) {
+        await playSuccessSound();
+      } else {
+        await playFoundSound();
+      }
+    } else {
+      await playFailureSound();
+    }
+  }
+  
+  // Rescan the note to update its status
+  if (results.success.size > 0) {
+    // Set current note as being checked and expand it
+    currentlyCheckingNoteId = note.id;
+    isCurrentlyChecking = true;
+    
+    // Find the note in recentNotes and expand it
+    const noteIndex = recentNotes.findIndex(n => n.id === note.id);
+    if (noteIndex >= 0) {
+      recentNotes[noteIndex].expanded = true;
+    }
+    
+    // Reset state for this note
+    foundOnRelays.set(new Set());
+    checkedRelays.set(new Set());
+    
+    // Set up target event
+    targetEvent = {
+      type: 'hex',
+      id: note.id,
+      relays: $userRelays
+    };
+    
+    // Check the note against all relays again
+    await checkNoteOnRelays(note.id, $userRelays);
+    
+    // Update note relay map
+    noteRelayMap.set(note.id, new Set(get(foundOnRelays)));
+    
+    // Clean up
+    isCurrentlyChecking = false;
+    currentlyCheckingNoteId = null;
+  }
+  
+  rebroadcastingNoteId = null;
+}
+
+// Rebroadcast all notes to relays they weren't found on
+async function rebroadcastAllNotes() {
+  if (recentNotes.length === 0) return;
+  
+  isRebroadcastingAll = true;
+  
+  try {
+    // Clear previous results
+    rebroadcastResults = new Map();
+    
+    for (const note of recentNotes) {
+      // Find relays where the note isn't present
+      const missingRelays = $userRelays.filter(relay => 
+        !noteRelayMap.get(note.id)?.has(relay)
+      );
+      
+      if (missingRelays.length === 0) {
+        debugLog(`Note ${note.id} already present on all relays`);
+        continue;
+      }
+      
+      // Rebroadcast to missing relays
+      await rebroadcastNote(note, missingRelays);
+      
+      // Small delay between notes
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    // Play success sound when all done
+    if (soundEnabled) {
+      await playSuccessSound();
+    }
+    
+    // Rescan all notes to update their status
+    debugLog(`Rescanning all notes after rebroadcast`);
+    isSearching = true;
+    await checkAllNotesInBatches();
+    
+  } catch (error) {
+    debugError('Error rebroadcasting all notes:', error);
+  } finally {
+    isRebroadcastingAll = false;
+    rebroadcastingNoteId = null;
+  }
 }
 
 // Login with NIP-07 extension
@@ -1937,7 +2128,7 @@ async function checkAllNotesInBatches() {
             </button>
           </div>
           
-          <div class="flex justify-between items-center">
+          <div class="flex justify-between items-center mb-3">
             <span class="text-gray-700 dark:text-gray-300 font-semibold text-sm">Your Relays ({$userRelays.length})</span>
             
             <div class="flex items-center gap-2">
@@ -1960,6 +2151,32 @@ async function checkAllNotesInBatches() {
               </button>
             </div>
           </div>
+          
+          <!-- Rebroadcast all button (only shown when notes are loaded and not currently checking) -->
+          {#if recentNotes.length > 0 && !isSearching && !isRebroadcastingAll}
+            <div class="mt-2 flex justify-end">
+              <button
+                class="px-3 py-1 text-sm bg-purple-500 hover:bg-purple-600 text-white rounded flex items-center gap-1 disabled:opacity-50"
+                on:click={rebroadcastAllNotes}
+                disabled={loadingNotes || isSearching || isRebroadcastingAll}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                Rebroadcast All Missing Notes
+              </button>
+            </div>
+          {/if}
+          
+          {#if isRebroadcastingAll}
+            <div class="mt-2 bg-purple-50 dark:bg-purple-900/30 p-2 rounded flex items-center gap-2">
+              <svg class="animate-spin h-4 w-4 text-purple-700 dark:text-purple-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <span class="text-sm text-purple-800 dark:text-purple-300">Rebroadcasting notes to relays... {rebroadcastingNoteId ? `Currently: ${rebroadcastingNoteId.substring(0, 8)}...` : ''}</span>
+            </div>
+          {/if}
           
           <div class="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-1">
             {#each $userRelays as relay}
@@ -2071,8 +2288,10 @@ async function checkAllNotesInBatches() {
                                      relayPercentage > 66 ? 'bg-yellow-500' : 
                                      relayPercentage > 33 ? 'bg-orange-500' : 'bg-red-500'}
                 {@const isChecking = currentlyCheckingNoteId === note.id}
+                {@const isRebroadcasting = rebroadcastingNoteId === note.id}
+                {@const rebroadcastResult = rebroadcastResults.get(note.id)}
                 
-                <div class="p-2.5 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-all duration-300 {isChecking ? 'bg-blue-50 dark:bg-blue-900/30 border-l-4 border-blue-500' : ''}">
+                <div class="p-2.5 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-all duration-300 {isChecking ? 'bg-blue-50 dark:bg-blue-900/30 border-l-4 border-blue-500' : isRebroadcasting ? 'bg-purple-50 dark:bg-purple-900/30 border-l-4 border-purple-500' : ''}">
                   <div class="flex justify-between items-center mb-1.5">
                     <div class="font-mono text-xs text-gray-500 dark:text-gray-400 flex items-center">
                       <span class="mr-2">{note.id.substring(0, 8)}...</span>
@@ -2086,14 +2305,37 @@ async function checkAllNotesInBatches() {
                           Checking
                         </span>
                       {/if}
+                      {#if isRebroadcasting}
+                        <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-300">
+                          <svg class="animate-spin -ml-0.5 mr-1.5 h-2 w-2 text-purple-700 dark:text-purple-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          Rebroadcasting
+                        </span>
+                      {/if}
                     </div>
                     <div class="flex items-center gap-1.5">
                       <div class="flex items-center space-x-1">
-                        <div class="w-2 h-2 rounded-full {isChecking ? 'animate-pulse bg-blue-500' : statusColor}"></div>
+                        <div class="w-2 h-2 rounded-full {isChecking ? 'animate-pulse bg-blue-500' : isRebroadcasting ? 'animate-pulse bg-purple-500' : statusColor}"></div>
                         <span class="text-xs font-medium">
                           {relayCount}/{$userRelays.length} relays
                         </span>
                       </div>
+                      
+                      {#if relayCount < $userRelays.length && !isSearching && !isRebroadcastingAll && !isRebroadcasting}
+                        <button
+                          class="text-xs px-1.5 py-0.5 bg-purple-200 dark:bg-purple-700 hover:bg-purple-300 dark:hover:bg-purple-600 rounded flex items-center gap-0.5"
+                          on:click={() => rebroadcastSingleNote(note)}
+                          title="Rebroadcast to missing relays"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                          </svg>
+                          Send
+                        </button>
+                      {/if}
+                      
                       <button
                         class="text-xs px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded"
                         on:click={() => note.expanded = !note.expanded}
@@ -2104,29 +2346,47 @@ async function checkAllNotesInBatches() {
                     </div>
                   </div>
                   
-                  <div class="mt-1 text-sm line-clamp-2 {isChecking ? 'text-blue-800 dark:text-blue-300 font-medium' : ''}">
+                  <div class="mt-1 text-sm line-clamp-2 {isChecking ? 'text-blue-800 dark:text-blue-300 font-medium' : isRebroadcasting ? 'text-purple-800 dark:text-purple-300 font-medium' : ''}">
                     {note.content.substring(0, 150)}
                     {note.content.length > 150 ? '...' : ''}
                   </div>
                   
+                  {#if rebroadcastResult && (rebroadcastResult.success.size > 0 || rebroadcastResult.failed.size > 0)}
+                    <div class="mt-1 text-xs">
+                      {#if rebroadcastResult.success.size > 0}
+                        <span class="text-green-600 dark:text-green-400">Rebroadcast to {rebroadcastResult.success.size} relay{rebroadcastResult.success.size !== 1 ? 's' : ''}</span>
+                      {/if}
+                      {#if rebroadcastResult.failed.size > 0}
+                        <span class="text-red-600 dark:text-red-400 ml-2">Failed on {rebroadcastResult.failed.size} relay{rebroadcastResult.failed.size !== 1 ? 's' : ''}</span>
+                      {/if}
+                    </div>
+                  {/if}
+                  
                   {#if note.expanded}
-                    <div class="mt-2 bg-gray-100 dark:bg-gray-800 p-2 rounded-md {isChecking ? 'border border-blue-300 dark:border-blue-700' : ''}">
+                    <div class="mt-2 bg-gray-100 dark:bg-gray-800 p-2 rounded-md {isChecking ? 'border border-blue-300 dark:border-blue-700' : isRebroadcasting ? 'border border-purple-300 dark:border-purple-700' : ''}">
                       <div class="text-xs font-medium mb-1 flex justify-between">
                         <span>Relay Status:</span>
                         {#if isChecking}
                           <span class="text-blue-600 dark:text-blue-400 animate-pulse">Scanning relays...</span>
+                        {/if}
+                        {#if isRebroadcasting}
+                          <span class="text-purple-600 dark:text-purple-400 animate-pulse">Rebroadcasting...</span>
                         {/if}
                       </div>
                       <div class="grid grid-cols-1 sm:grid-cols-2 gap-1">
                         {#each $userRelays as relay}
                           {@const isFound = noteRelayMap.get(note.id)?.has(relay) || false}
                           {@const isPending = isChecking && !get(checkedRelays).has(relay)}
+                          {@const isRebroadcastingToRelay = isRebroadcasting && !isFound}
                           <div class="flex items-center gap-1 text-xs p-1 rounded 
                             {isFound ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 
                              isPending ? 'bg-gray-50 dark:bg-gray-900 text-gray-500 dark:text-gray-400' : 
+                             isRebroadcastingToRelay ? 'bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400' :
                              'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400'}">
                             {#if isPending}
                               <div class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse"></div>
+                            {:else if isRebroadcastingToRelay}
+                              <div class="w-1.5 h-1.5 rounded-full bg-purple-500 animate-pulse"></div>
                             {:else}
                               <div class="w-1.5 h-1.5 rounded-full {isFound ? 'bg-green-500' : 'bg-red-500'}"></div>
                             {/if}
