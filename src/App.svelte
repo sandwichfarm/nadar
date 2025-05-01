@@ -912,6 +912,9 @@ async function rebroadcastNote(note: Event, targetRelays: string[]): Promise<{su
   const successRelays = new Set<string>();
   const failedRelays = new Set<string>();
   
+  // Keep track of existing found relays
+  const existingRelays = noteRelayMap.get(note.id) || new Set<string>();
+  
   // Process relays in batches to avoid overwhelming the browser
   const MAX_CONCURRENT = Math.min(MAX_CONCURRENT_RELAYS, 20);
   
@@ -937,12 +940,6 @@ async function rebroadcastNote(note: Event, targetRelays: string[]): Promise<{su
         // If we get here, publish was successful
         successRelays.add(relayUrl);
         debugLog(`Successfully rebroadcast note ${note.id} to ${relayUrl}`);
-        
-        // Update note relay map
-        if (!noteRelayMap.has(note.id)) {
-          noteRelayMap.set(note.id, new Set());
-        }
-        noteRelayMap.get(note.id)?.add(relayUrl);
         
         return { relayUrl, success: true };
       } catch (error) {
@@ -991,6 +988,9 @@ async function rebroadcastSingleNote(note: Event) {
     await playRadarSound();
   }
   
+  // Get the current relay state before rebroadcasting
+  const existingRelays = new Set(noteRelayMap.get(note.id));
+  
   // Rebroadcast to missing relays
   const results = await rebroadcastNote(note, missingRelays);
   
@@ -1007,7 +1007,7 @@ async function rebroadcastSingleNote(note: Event) {
     }
   }
   
-  // Rescan the note to update its status
+  // Ensure we preserve the existing relay mapping
   if (results.success.size > 0) {
     // Set current note as being checked and expand it
     currentlyCheckingNoteId = note.id;
@@ -1020,7 +1020,7 @@ async function rebroadcastSingleNote(note: Event) {
     }
     
     // Reset state for this note
-    foundOnRelays.set(new Set());
+    foundOnRelays.set(new Set(existingRelays)); // Start with existing
     checkedRelays.set(new Set());
     
     // Set up target event
@@ -1030,11 +1030,20 @@ async function rebroadcastSingleNote(note: Event) {
       relays: $userRelays
     };
     
-    // Check the note against all relays again
+    // We'll manually add the newly successful relays
+    results.success.forEach(relayUrl => {
+      foundOnRelays.update(relays => {
+        relays.add(relayUrl);
+        return relays;
+      });
+    });
+    
+    // Also check the note against all relays again for verification
     await checkNoteOnRelays(note.id, $userRelays);
     
-    // Update note relay map
-    noteRelayMap.set(note.id, new Set(get(foundOnRelays)));
+    // Combine previous relay data with newly found relays
+    const updatedRelays = new Set([...existingRelays, ...get(foundOnRelays)]);
+    noteRelayMap.set(note.id, updatedRelays);
     
     // Clean up
     isCurrentlyChecking = false;
@@ -1053,6 +1062,14 @@ async function rebroadcastAllNotes() {
   try {
     // Clear previous results
     rebroadcastResults = new Map();
+    
+    // Save the current relay mappings
+    const savedRelayMaps = new Map<string, Set<string>>();
+    for (const note of recentNotes) {
+      if (noteRelayMap.has(note.id)) {
+        savedRelayMaps.set(note.id, new Set(noteRelayMap.get(note.id)));
+      }
+    }
     
     for (const note of recentNotes) {
       // Find relays where the note isn't present
@@ -1077,16 +1094,59 @@ async function rebroadcastAllNotes() {
       await playSuccessSound();
     }
     
+    // Restore saved relay mappings
+    for (const [noteId, relays] of savedRelayMaps.entries()) {
+      noteRelayMap.set(noteId, relays);
+    }
+    
     // Rescan all notes to update their status
     debugLog(`Rescanning all notes after rebroadcast`);
     isSearching = true;
-    await checkAllNotesInBatches();
+    
+    // We'll now check all notes against all relays, preserving the existing data
+    for (const note of recentNotes) {
+      // Skip if we don't have this note in the map
+      if (!noteRelayMap.has(note.id)) continue;
+      
+      // Set current note as being checked
+      currentlyCheckingNoteId = note.id;
+      isCurrentlyChecking = true;
+      
+      // Reset search state but start with existing data
+      foundOnRelays.set(new Set(noteRelayMap.get(note.id)));
+      checkedRelays.set(new Set());
+      
+      // Check all relays for this note
+      targetEvent = {
+        type: 'hex',
+        id: note.id,
+        relays: $userRelays
+      };
+      
+      // Check all relays
+      await checkNoteOnRelays(note.id, $userRelays);
+      
+      // Update the note relay map
+      const updatedRelays = new Set([...noteRelayMap.get(note.id) || [], ...get(foundOnRelays)]);
+      noteRelayMap.set(note.id, updatedRelays);
+      
+      // Increment checked notes
+      totalNotesChecked++;
+      
+      // Small delay
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    
+    isSearching = false;
+    searchCompleted = true;
     
   } catch (error) {
     debugError('Error rebroadcasting all notes:', error);
   } finally {
     isRebroadcastingAll = false;
     rebroadcastingNoteId = null;
+    isCurrentlyChecking = false;
+    currentlyCheckingNoteId = null;
   }
 }
 
@@ -1382,6 +1442,12 @@ async function checkNoteOnRelays(noteId: string, relayUrls: string[]) {
                 return relays;
               });
               
+              // Also update the noteRelayMap directly
+              if (!noteRelayMap.has(noteId)) {
+                noteRelayMap.set(noteId, new Set());
+              }
+              noteRelayMap.get(noteId)?.add(relayUrl);
+              
               // Play click sound when a relay is found
               if (soundEnabled && !foundRelayInCurrentBatch) {
                 foundRelayInCurrentBatch = true;
@@ -1545,7 +1611,7 @@ async function checkAllNotesInBatches() {
         // Check all relays for this note individually (similar to findEventOnRelays but targeted)
         await checkNoteOnRelays(note.id, $userRelays);
         
-        // Store the results in the noteRelayMap
+        // Ensure noteRelayMap is correctly updated from foundOnRelays
         noteRelayMap.set(note.id, new Set(get(foundOnRelays)));
         
         // Increment the number of checked notes
@@ -1585,9 +1651,11 @@ async function checkAllNotesInBatches() {
   }
 }
 
+$: MODE = activeMode;
+
 </script>
 
-<div class="min-h-screen w-full bg-white dark:bg-gray-900">
+<div class="min-h-screen w-full bg-white dark:bg-gray-900 pb-20">
 <main class="container mx-auto p-4 relative dark:bg-gray-900 dark:text-white min-h-screen">
   <div class="flex flex-col sm:flex-row items-center gap-4 mb-4">
     <div class="flex items-center gap-4">
@@ -2405,7 +2473,7 @@ async function checkAllNotesInBatches() {
     </div>
   {/if}
 
-  {#if $foundOnRelays.size > 0}
+  {#if $foundOnRelays.size > 0 && 0 && activeMode === 1}
     <div class="mb-4">
       <h2 class="text-xl font-semibold mb-2">Found on {$foundOnRelays.size} relays:</h2>
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
@@ -2455,6 +2523,10 @@ async function checkAllNotesInBatches() {
 
   <!-- Keep progress visible at bottom of screen -->
   {#if isSearching && recentNotes.length > 0}
+    {@const currentNote = currentlyCheckingNoteId ? recentNotes.find(note => note.id === currentlyCheckingNoteId) : null}
+    {@const currentRelayCount = currentlyCheckingNoteId && noteRelayMap.has(currentlyCheckingNoteId) 
+      ? noteRelayMap.get(currentlyCheckingNoteId)?.size || 0 
+      : 0}
     <div class="fixed bottom-0 left-0 right-0 bg-blue-50 dark:bg-blue-900/70 p-2 shadow-lg border-t border-blue-200 dark:border-blue-800 z-10">
       <div class="container mx-auto max-w-3xl">
         <div class="flex items-center justify-between">
