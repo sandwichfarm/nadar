@@ -885,7 +885,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
 // Mode 2: NIP-07 Extension & NIP-65 variables
 let loggedIn = false;
 let currentPubkey = '';
-let userRelays: Writable<string[]> = writable([]);
+let userRelays: Writable<Set<string>> = writable(new Set());
 let recentNotes: ExpandableNote[] = [];
 let loadingNotes = false;
 let noteRelayMap: Map<string, Set<string>> = new Map(); // Maps note IDs to the relays they were found on
@@ -977,10 +977,10 @@ async function rebroadcastSingleNote(note: Event) {
   if (!note || !noteRelayMap.has(note.id)) return;
   
   // Find relays where the note isn't present
-  const missingRelays = $userRelays.filter(relay => 
+  const missingRelays = Array.from($userRelays).filter(relay => 
     !noteRelayMap.get(note.id)?.has(relay)
   );
-  
+    
   if (missingRelays.length === 0) {
     debugLog(`Note ${note.id} already present on all relays`);
     return;
@@ -1030,7 +1030,7 @@ async function rebroadcastSingleNote(note: Event) {
     targetEvent = {
       type: 'hex',
       id: note.id,
-      relays: $userRelays
+      relays: Array.from($userRelays)
     };
     
     // We'll manually add the newly successful relays
@@ -1042,7 +1042,7 @@ async function rebroadcastSingleNote(note: Event) {
     });
     
     // Also check the note against all relays again for verification
-    await checkNoteOnRelays(note.id, $userRelays);
+    await checkNoteOnRelays(note.id, Array.from($userRelays));
     
     // Combine previous relay data with newly found relays
     const updatedRelays = new Set([...existingRelays, ...get(foundOnRelays)]);
@@ -1082,7 +1082,7 @@ async function rebroadcastAllNotes() {
     
     for (const note of recentNotes) {
       // Find relays where the note isn't present
-      const missingRelays = $userRelays.filter(relay => 
+      const missingRelays = Array.from($userRelays).filter(relay => 
         !noteRelayMap.get(note.id)?.has(relay)
       );
       
@@ -1092,7 +1092,7 @@ async function rebroadcastAllNotes() {
       }
       
       notesWithMissingRelays++;
-      debugLog(`Note ${note.id} missing from ${missingRelays.length}/${$userRelays.length} relays`);
+      debugLog(`Note ${note.id} missing from ${missingRelays.length}/${$userRelays.size} relays`);
       
       // Rebroadcast to missing relays
       await rebroadcastNote(note, missingRelays);
@@ -1132,7 +1132,7 @@ async function rebroadcastAllNotes() {
       const currentRelays = noteRelayMap.get(note.id) || new Set();
       
       // Skip if note is already on all relays
-      if (currentRelays.size === $userRelays.length) {
+      if (currentRelays.size === $userRelays.size) {
         debugLog(`Note ${note.id} already on all relays after rebroadcast, skipping check`);
         totalNotesChecked++;
         continue;
@@ -1150,11 +1150,11 @@ async function rebroadcastAllNotes() {
       targetEvent = {
         type: 'hex',
         id: note.id,
-        relays: $userRelays
+        relays: Array.from($userRelays)
       };
       
       // Only check relays where this note is missing
-      await checkNoteOnRelays(note.id, $userRelays);
+      await checkNoteOnRelays(note.id, Array.from($userRelays));
       
       // Update the note relay map
       const updatedRelays = new Set([...currentRelays, ...get(foundOnRelays)]);
@@ -1304,7 +1304,7 @@ async function fetchUserRelays() {
               }
             }
           }
-          userRelays.set(_userRelays);
+          userRelays.set(new Set(_userRelays));
         },
         oneose: () => {
           debugLog('EOSE received for relay list');
@@ -1332,7 +1332,7 @@ async function fetchUserRelays() {
 
 // Fetch recent notes from user's relays
 async function fetchRecentNotes(limit: number = 20) {
-  if ($userRelays.length === 0) return;
+  if ($userRelays.size === 0) return;
   
   loadingNotes = true;
   recentNotes = [];
@@ -1366,8 +1366,8 @@ async function fetchRecentNotes(limit: number = 20) {
     const maxRelaysPerBatch = Math.min(MAX_CONCURRENT_RELAYS, 20); // Ensure no more than 20 concurrent relays
     
     // Process relays in batches to avoid overwhelming the browser
-    for (let i = 0; i < $userRelays.length; i += maxRelaysPerBatch) {
-      const batchRelays = $userRelays.slice(i, i + maxRelaysPerBatch);
+    for (let i = 0; i < $userRelays.size; i += maxRelaysPerBatch) {
+      const batchRelays = Array.from($userRelays).slice(i, i + maxRelaysPerBatch);
       debugLog(`Processing relay batch for notes: ${batchRelays.length} relays`);
       
       // Set up connections to all relays in this batch
@@ -1433,7 +1433,7 @@ async function fetchRecentNotes(limit: number = 20) {
     
     // Convert collected notes to array and sort
     recentNotes = Object.values(allNotes).sort((a, b) => b.created_at - a.created_at);
-    debugLog(`Found ${recentNotes.length} notes from ${$userRelays.length} relays`);
+    debugLog(`Found ${recentNotes.length} notes from ${$userRelays.size} relays`);
     
   } catch (error) {
     debugError('Error fetching recent notes:', error);
@@ -1618,7 +1618,7 @@ async function checkNoteOnRelays(noteId: string, relayUrls: string[]) {
 
 // Check all notes in batches
 async function checkAllNotesInBatches() {
-  if (recentNotes.length === 0 || $userRelays.length === 0) return;
+  if (recentNotes.length === 0 || $userRelays.size === 0) return;
   
   const BATCH_SIZE = 1; // Process 1 note at a time for better UX
   const batchCount = Math.ceil(recentNotes.length / BATCH_SIZE);
@@ -1639,15 +1639,15 @@ async function checkAllNotesInBatches() {
         
         // Check if note is already on all relays
         const currentRelays = noteRelayMap.get(note.id) || new Set();
-        if (currentRelays.size === $userRelays.length) {
-          debugLog(`Note ${note.id} already on all relays (${currentRelays.size}/${$userRelays.length}), skipping`);
+        if (currentRelays.size === $userRelays.size) {
+          debugLog(`Note ${note.id} already on all relays (${currentRelays.size}/${$userRelays.size}), skipping`);
           // Still increment counter to maintain progress
           totalNotesChecked++;
           continue;
         }
         
         // Check if there are any relays to check
-        const missingRelayCount = $userRelays.length - currentRelays.size;
+        const missingRelayCount = $userRelays.size - currentRelays.size;
         if (missingRelayCount === 0) {
           debugLog(`No relays to check for note ${note.id}`);
           totalNotesChecked++;
@@ -1668,7 +1668,7 @@ async function checkAllNotesInBatches() {
         targetEvent = {
           type: 'hex',
           id: note.id,
-          relays: $userRelays
+          relays: Array.from($userRelays)
         };
         
         // Reset state for this note
@@ -1676,7 +1676,7 @@ async function checkAllNotesInBatches() {
         checkedRelays.set(new Set());
         
         // Only check relays where the note is missing
-        await checkNoteOnRelays(note.id, $userRelays);
+        await checkNoteOnRelays(note.id, Array.from($userRelays));
         
         // Ensure noteRelayMap is correctly updated from foundOnRelays
         noteRelayMap.set(note.id, new Set(get(foundOnRelays)));
@@ -1690,7 +1690,7 @@ async function checkAllNotesInBatches() {
         // Play success sound if note was found on all relays, otherwise play partial success sound
         if (soundEnabled) {
           const foundRelaysCount = get(foundOnRelays).size;
-          if (foundRelaysCount === $userRelays.length) {
+          if (foundRelaysCount === $userRelays.size) {
             await playSuccessSound();
           } else if (foundRelaysCount > 0) {
             await playFoundSound();
@@ -1730,7 +1730,7 @@ $: MODE = activeMode;
 function logout() {
   loggedIn = false;
   currentPubkey = '';
-  userRelays.set([]);
+  userRelays.set(new Set());
   recentNotes = [];
   noteRelayMap.clear();
   totalNotesChecked = 0;
@@ -1772,7 +1772,7 @@ let noteFetchCount = 20; // Default number of notes to fetch
 
 // Update the fetchAndCheckNotes function to properly check relays
 async function fetchAndCheckNotes(limit: number = 20) {
-  if ($userRelays.length === 0) return;
+  if ($userRelays.size === 0) return;
   
   loadingNotes = true;
   recentNotes = [];
@@ -2402,7 +2402,7 @@ async function fetchAndCheckNotes(limit: number = 20) {
           </div>
           
           <div class="flex justify-between items-center mb-3">
-            <span class="text-gray-700 dark:text-gray-300 font-semibold text-sm">Your Relays ({$userRelays.length})</span>
+            <span class="text-gray-700 dark:text-gray-300 font-semibold text-sm">Your Relays ({$userRelays.size})</span>
             
             <div class="flex items-center gap-2">
               <label for="noteCountInput" class="text-xs text-gray-600 dark:text-gray-400">Notes to fetch:</label>
@@ -2418,7 +2418,7 @@ async function fetchAndCheckNotes(limit: number = 20) {
               <button
                 class="px-3 py-1 text-sm bg-green-500 hover:bg-green-600 text-white rounded disabled:opacity-50"
                 on:click={() => fetchAndCheckNotes(noteFetchCount)}
-                disabled={loadingNotes || $userRelays.length === 0 || isSearching}
+                disabled={loadingNotes || $userRelays.size === 0 || isSearching}
               >
                 {loadingNotes || isSearching ? 'Working...' : 'Fetch & Check'}
               </button>
@@ -2472,7 +2472,7 @@ async function fetchAndCheckNotes(limit: number = 20) {
                 </div>
                 <div>
                   <span class="text-gray-600 dark:text-gray-400">Your Relays:</span>
-                  <span class="ml-2">{$userRelays.length}</span>
+                  <span class="ml-2">{$userRelays.size}</span>
                 </div>
                 <div>
                   <span class="text-gray-600 dark:text-gray-400">Progress:</span>
@@ -2514,7 +2514,7 @@ async function fetchAndCheckNotes(limit: number = 20) {
                 <h2 class="text-xl font-semibold text-green-800 dark:text-green-400">Check Complete!</h2>
               </div>
               <div class="mt-2 text-green-700 dark:text-green-300">
-                Checked {recentNotes.length} notes on {$userRelays.length} relays in {searchDuration.toFixed(1)} seconds
+                Checked {recentNotes.length} notes on {$userRelays.size} relays in {searchDuration.toFixed(1)} seconds
               </div>
             </div>
             
@@ -2528,18 +2528,18 @@ async function fetchAndCheckNotes(limit: number = 20) {
                 </div>
                 <div>
                   <span class="text-gray-600 dark:text-gray-400">Relays Checked:</span>
-                  <span class="ml-2 font-semibold">{$userRelays.length}</span>
+                  <span class="ml-2 font-semibold">{$userRelays.size}</span>
                 </div>
                 <div>
                   <span class="text-gray-600 dark:text-gray-400">Fully Synced Notes:</span>
                   <span class="ml-2 font-semibold">
-                    {recentNotes.filter(note => noteRelayMap.get(note.id)?.size === $userRelays.length).length}
+                    {recentNotes.filter(note => noteRelayMap.get(note.id)?.size === $userRelays.size).length}
                   </span>
                 </div>
                 <div>
                   <span class="text-gray-600 dark:text-gray-400">Average Coverage:</span>
                   <span class="ml-2 font-semibold">
-                    {(recentNotes.reduce((acc, note) => acc + (noteRelayMap.get(note.id)?.size || 0), 0) / (recentNotes.length * $userRelays.length) * 100).toFixed(1)}%
+                    {(recentNotes.reduce((acc, note) => acc + (noteRelayMap.get(note.id)?.size || 0), 0) / (recentNotes.length * $userRelays.size) * 100).toFixed(1)}%
                   </span>
                 </div>
               </div>
@@ -2556,7 +2556,7 @@ async function fetchAndCheckNotes(limit: number = 20) {
             <div class="divide-y dark:divide-gray-700">
               {#each recentNotes as note}
                 {@const relayCount = noteRelayMap.get(note.id)?.size || 0}
-                {@const relayPercentage = Math.round((relayCount / $userRelays.length) * 100)}
+                {@const relayPercentage = Math.round((relayCount / $userRelays.size) * 100)}
                 {@const statusColor = relayPercentage === 100 ? 'bg-green-500' : 
                                      relayPercentage > 66 ? 'bg-yellow-500' : 
                                      relayPercentage > 33 ? 'bg-orange-500' : 'bg-red-500'}
@@ -2592,11 +2592,11 @@ async function fetchAndCheckNotes(limit: number = 20) {
                       <div class="flex items-center space-x-1">
                         <div class="w-2 h-2 rounded-full {isChecking ? 'animate-pulse bg-blue-500' : isRebroadcasting ? 'animate-pulse bg-purple-500' : statusColor}"></div>
                         <span class="text-xs font-medium">
-                          {relayCount}/{$userRelays.length} relays
+                          {relayCount}/{$userRelays.size} relays
                         </span>
                       </div>
                       
-                      {#if relayCount < $userRelays.length && !isSearching && !isRebroadcastingAll && !isRebroadcasting}
+                      {#if relayCount < $userRelays.size && !isSearching && !isRebroadcastingAll && !isRebroadcasting}
                         <button
                           class="text-xs px-1.5 py-0.5 bg-purple-200 dark:bg-purple-700 hover:bg-purple-300 dark:hover:bg-purple-600 rounded flex items-center gap-0.5"
                           on:click={() => rebroadcastSingleNote(note)}
@@ -2743,9 +2743,9 @@ async function fetchAndCheckNotes(limit: number = 20) {
               Checking: {currentlyCheckingNoteId.substring(0, 8)}...
             {/if}
             
-            {#if get(checkedRelays).size > 0 && $userRelays.length > 0}
+            {#if get(checkedRelays).size > 0 && $userRelays.size > 0}
               <span class="text-xs font-medium">
-                Relay check: {get(checkedRelays).size % $userRelays.length || $userRelays.length}/{$userRelays.length}
+                Relay check: {get(checkedRelays).size % $userRelays.size || $userRelays.size}/{$userRelays.size}
               </span>
             {/if}
           </div>
