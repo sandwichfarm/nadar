@@ -890,6 +890,9 @@ let recentNotes: ExpandableNote[] = [];
 let loadingNotes = false;
 let noteRelayMap: Map<string, Set<string>> = new Map(); // Maps note IDs to the relays they were found on
 let noteSubscriptions: SubCloser[] = [];
+let currentlyCheckingNoteId: string | null = null;
+let totalNotesChecked = 0;
+let isCurrentlyChecking = false;
 
 // Check if NIP-07 extension is available
 function hasNip07Extension(): boolean {
@@ -1137,6 +1140,9 @@ async function checkNoteOnRelays(noteId: string, relayUrls: string[]) {
     const currentBatch = relayUrls.slice(i, i + MAX_CONCURRENT);
     debugLog(`Processing relay batch for note ${noteId}: ${currentBatch.length} relays`);
     
+    // Track if we've found a relay in this batch (for sound effects)
+    let foundRelayInCurrentBatch = false;
+    
     // Process each relay in the batch
     const batchPromises = currentBatch.map(async (relayUrl, index) => {
       if (!isSearching) return null;
@@ -1184,6 +1190,12 @@ async function checkNoteOnRelays(noteId: string, relayUrls: string[]) {
                 relays.add(relayUrl);
                 return relays;
               });
+              
+              // Play click sound when a relay is found
+              if (soundEnabled && !foundRelayInCurrentBatch) {
+                foundRelayInCurrentBatch = true;
+                playFoundSound();
+              }
               
               sub.close();
               resolve(true);
@@ -1274,6 +1286,9 @@ async function fetchAndCheckNotes(limit: number = 20) {
   loadingNotes = true;
   recentNotes = [];
   noteRelayMap.clear();
+  totalNotesChecked = 0;
+  currentlyCheckingNoteId = null;
+  isCurrentlyChecking = false;
   
   try {
     // First fetch the notes
@@ -1289,6 +1304,8 @@ async function fetchAndCheckNotes(limit: number = 20) {
     debugError('Error in fetch and check notes:', error);
   } finally {
     loadingNotes = false;
+    currentlyCheckingNoteId = null;
+    isCurrentlyChecking = false;
   }
 }
 
@@ -1296,7 +1313,7 @@ async function fetchAndCheckNotes(limit: number = 20) {
 async function checkAllNotesInBatches() {
   if (recentNotes.length === 0 || $userRelays.length === 0) return;
   
-  const BATCH_SIZE = 5; // Process 5 notes at a time
+  const BATCH_SIZE = 1; // Process 1 note at a time for better UX
   const batchCount = Math.ceil(recentNotes.length / BATCH_SIZE);
   
   isSearching = true;
@@ -1312,6 +1329,16 @@ async function checkAllNotesInBatches() {
         if (!isSearching) break;
         
         debugLog(`Processing note ${note.id}`);
+        
+        // Set current note as being checked and expand it
+        currentlyCheckingNoteId = note.id;
+        isCurrentlyChecking = true;
+        note.expanded = true;
+        
+        // Play the radar sound when starting to check a new note
+        if (soundEnabled) {
+          await playRadarSound();
+        }
         
         // Set up the target event for this note
         targetEvent = {
@@ -1329,6 +1356,31 @@ async function checkAllNotesInBatches() {
         
         // Store the results in the noteRelayMap
         noteRelayMap.set(note.id, new Set(get(foundOnRelays)));
+        
+        // Increment the number of checked notes
+        totalNotesChecked++;
+        
+        // Play success sound if note was found on all relays, otherwise play partial success sound
+        if (soundEnabled) {
+          const foundRelaysCount = get(foundOnRelays).size;
+          if (foundRelaysCount === $userRelays.length) {
+            await playSuccessSound();
+          } else if (foundRelaysCount > 0) {
+            await playFoundSound();
+          } else {
+            await playFailureSound();
+          }
+        }
+        
+        // Keep note expanded for a moment so user can see the results
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Collapse the note if not the last one
+        if (batchIndex < batchCount - 1) {
+          note.expanded = false;
+        }
+        
+        isCurrentlyChecking = false;
       }
     }
   } catch (error) {
@@ -1337,6 +1389,8 @@ async function checkAllNotesInBatches() {
     isSearching = false;
     searchCompleted = true;
     searchDuration = (Date.now() - searchStartTime) / 1000;
+    currentlyCheckingNoteId = null;
+    isCurrentlyChecking = false;
   }
 }
 
@@ -2016,16 +2070,26 @@ async function checkAllNotesInBatches() {
                 {@const statusColor = relayPercentage === 100 ? 'bg-green-500' : 
                                      relayPercentage > 66 ? 'bg-yellow-500' : 
                                      relayPercentage > 33 ? 'bg-orange-500' : 'bg-red-500'}
+                {@const isChecking = currentlyCheckingNoteId === note.id}
                 
-                <div class="p-2.5 hover:bg-gray-100 dark:hover:bg-gray-700/50">
+                <div class="p-2.5 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-all duration-300 {isChecking ? 'bg-blue-50 dark:bg-blue-900/30 border-l-4 border-blue-500' : ''}">
                   <div class="flex justify-between items-center mb-1.5">
                     <div class="font-mono text-xs text-gray-500 dark:text-gray-400 flex items-center">
                       <span class="mr-2">{note.id.substring(0, 8)}...</span>
                       <span class="text-xs text-gray-400 dark:text-gray-500">{new Date(note.created_at * 1000).toLocaleString()}</span>
+                      {#if isChecking}
+                        <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">
+                          <svg class="animate-spin -ml-0.5 mr-1.5 h-2 w-2 text-blue-700 dark:text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          Checking
+                        </span>
+                      {/if}
                     </div>
                     <div class="flex items-center gap-1.5">
                       <div class="flex items-center space-x-1">
-                        <div class="w-2 h-2 rounded-full {statusColor}"></div>
+                        <div class="w-2 h-2 rounded-full {isChecking ? 'animate-pulse bg-blue-500' : statusColor}"></div>
                         <span class="text-xs font-medium">
                           {relayCount}/{$userRelays.length} relays
                         </span>
@@ -2033,25 +2097,39 @@ async function checkAllNotesInBatches() {
                       <button
                         class="text-xs px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded"
                         on:click={() => note.expanded = !note.expanded}
+                        disabled={isCurrentlyChecking && note.id !== currentlyCheckingNoteId}
                       >
                         {note.expanded ? 'Hide' : 'Details'}
                       </button>
                     </div>
                   </div>
                   
-                  <div class="mt-1 text-sm line-clamp-2">
+                  <div class="mt-1 text-sm line-clamp-2 {isChecking ? 'text-blue-800 dark:text-blue-300 font-medium' : ''}">
                     {note.content.substring(0, 150)}
                     {note.content.length > 150 ? '...' : ''}
                   </div>
                   
                   {#if note.expanded}
-                    <div class="mt-2 bg-gray-100 dark:bg-gray-800 p-2 rounded-md">
-                      <div class="text-xs font-medium mb-1">Relay Status:</div>
+                    <div class="mt-2 bg-gray-100 dark:bg-gray-800 p-2 rounded-md {isChecking ? 'border border-blue-300 dark:border-blue-700' : ''}">
+                      <div class="text-xs font-medium mb-1 flex justify-between">
+                        <span>Relay Status:</span>
+                        {#if isChecking}
+                          <span class="text-blue-600 dark:text-blue-400 animate-pulse">Scanning relays...</span>
+                        {/if}
+                      </div>
                       <div class="grid grid-cols-1 sm:grid-cols-2 gap-1">
                         {#each $userRelays as relay}
                           {@const isFound = noteRelayMap.get(note.id)?.has(relay) || false}
-                          <div class="flex items-center gap-1 text-xs p-1 rounded {isFound ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400'}">
-                            <div class="w-1.5 h-1.5 rounded-full {isFound ? 'bg-green-500' : 'bg-red-500'}"></div>
+                          {@const isPending = isChecking && !get(checkedRelays).has(relay)}
+                          <div class="flex items-center gap-1 text-xs p-1 rounded 
+                            {isFound ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 
+                             isPending ? 'bg-gray-50 dark:bg-gray-900 text-gray-500 dark:text-gray-400' : 
+                             'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400'}">
+                            {#if isPending}
+                              <div class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse"></div>
+                            {:else}
+                              <div class="w-1.5 h-1.5 rounded-full {isFound ? 'bg-green-500' : 'bg-red-500'}"></div>
+                            {/if}
                             <span class="font-mono truncate">{relay}</span>
                           </div>
                         {/each}
@@ -2110,6 +2188,33 @@ async function checkAllNotesInBatches() {
           >
             JSON array
           </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Keep progress visible at bottom of screen -->
+  {#if isSearching && recentNotes.length > 0}
+    <div class="fixed bottom-0 left-0 right-0 bg-blue-50 dark:bg-blue-900/70 p-2 shadow-lg border-t border-blue-200 dark:border-blue-800 z-10">
+      <div class="container mx-auto max-w-3xl">
+        <div class="flex items-center justify-between">
+          <div class="font-medium text-blue-800 dark:text-blue-300">
+            Note {totalNotesChecked}/{recentNotes.length}
+          </div>
+          <div class="text-sm text-blue-700 dark:text-blue-400">
+            {#if currentlyCheckingNoteId}
+              Checking: {currentlyCheckingNoteId.substring(0, 8)}...
+            {/if}
+            
+            {#if get(checkedRelays).size > 0 && $userRelays.length > 0}
+              <span class="text-xs font-medium">
+                Relay check: {get(checkedRelays).size % $userRelays.length || $userRelays.length}/{$userRelays.length}
+              </span>
+            {/if}
+          </div>
+        </div>
+        <div class="w-full bg-blue-200 dark:bg-blue-800 h-1 mt-2 rounded-full">
+          <div class="bg-blue-500 h-1 rounded-full" style="width:{(totalNotesChecked / recentNotes.length * 100)}%"></div>
         </div>
       </div>
     </div>
