@@ -2678,7 +2678,7 @@ async function fetchAndCheckNotes(limit: number = 20) {
     </div>
   {/if}
 
-  {#if $foundOnRelays.size > 0 && 0 && activeMode === 1}
+  {#if $foundOnRelays.size > 0 && activeMode === 1}
     <div class="mb-4">
       <h2 class="text-xl font-semibold mb-2">Found on {$foundOnRelays.size} relays:</h2>
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
