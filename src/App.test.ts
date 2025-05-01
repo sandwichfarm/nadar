@@ -8,8 +8,14 @@ describe('App', () => {
     expect(screen.getByText('NADAR')).toBeTruthy()
   })
 
+  it('renders mode switcher tabs', () => {
+    render(App)
+    expect(screen.getByText('Find Note by ID')).toBeTruthy()
+    expect(screen.getByText('Check Your Notes')).toBeTruthy()
+  })
+  
   it('renders the description', () => {
     render(App)
-    expect(screen.getByText(/NADAR can be used to check where your post is visible on Nostr/)).toBeTruthy()
+    expect(screen.getByText(/NADAR 2.0 is a tool for finding specific notes on nostr/)).toBeTruthy()
   })
 })

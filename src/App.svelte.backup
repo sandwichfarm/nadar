@@ -1,9 +1,8 @@
 <script lang="ts">
 import { onDestroy, onMount } from 'svelte';
-import { NostrFetcher, type NostrEvent } from 'nostr-fetch';
+import { NostrFetcher } from 'nostr-fetch';
 import type { Event, Filter } from 'nostr-tools';
-import { Relay } from 'nostr-tools';
-import { SimplePool } from 'nostr-tools/pool';
+import { Relay, SimplePool } from 'nostr-tools';
 import { nip19 } from 'nostr-tools';
 import { get, writable, type Writable } from 'svelte/store';
 import type { SubCloser } from 'nostr-tools/abstract-pool';
@@ -21,18 +20,11 @@ const DEFAULT_DISCOVERY_RELAYS = [
   'wss://relaypag.es',
   'wss://monitorlizard.nostr1.com'
 ];
-const DEFAULT_USERMETA_RELAYS = [
-  'wss://purplepag.es',
-  'wss://user.kindpag.es',
-  'wss://relay.nostr.band',
-  'wss://relay.damus.io',
-  'wss://nos.lol'
-]
 const DEFAULT_MAX_CONCURRENT_RELAYS = 21;
 const DEFAULT_SOUND_ENABLED = false;
 const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_THEME = 'system'; // 'light', 'dark', or 'system'
-const DEFAULT_DEBUG = true;
+const DEFAULT_DEBUG = false;
 const DEFAULT_ACTIVE_MODE = 1; // Default to Mode 1
 
 // Load preferences from localStorage or use defaults
@@ -879,7 +871,7 @@ $: alternateLink = isNsite ? CLEARNET_ADDRESS : `https://${STATIC_NPUB}.${NSITE_
 // Mode 2: NIP-07 Extension & NIP-65 variables
 let loggedIn = false;
 let currentPubkey = '';
-let userRelays: Writable<string[]> = writable([]);
+let userRelays: string[] = [];
 let recentNotes: Event[] = [];
 let loadingNotes = false;
 let noteRelayMap: Map<string, Set<string>> = new Map(); // Maps note IDs to the relays they were found on
@@ -929,48 +921,54 @@ async function fetchUserRelays() {
   if (!currentPubkey) return;
   
   debugLog('Fetching relays for pubkey:', currentPubkey);
-  const _userRelays: string[] = [];
-
-  const pool = new SimplePool()
-
-  pool.subscribeMany(
-    DEFAULT_USERMETA_RELAYS, 
-    [{
-      kinds: [10002],
-      authors: [currentPubkey]
-    }], 
-    {
-      onevent: (event: NostrEvent) => {
-
-        debugLog('Found NIP-65 event:', event);
+  userRelays = [];
+  
+  const fetcher = NostrFetcher.init();
+  try {
+    // Try to find the most recent kind:10002 event
+    const relayListEvents = await fetcher.fetchLatestEvents(
+      DISCOVERY_RELAYS,
+      {
+        authors: [currentPubkey],
+        kinds: [10002]
+      },
+      1
+    );
+    
+    if (relayListEvents.length > 0) {
+      const event = relayListEvents[0];
+      debugLog('Found NIP-65 event:', event);
+      
+      // Extract relay URLs from the event tags
+      for (const tag of event.tags) {
+        if (tag[0] === 'r') {
+          const url = tag[1];
+          const readPermission = tag[2] !== 'write'; // If not explicitly write-only
           
-        // Extract relay URLs from the event tags
-        for (const tag of event.tags) {
-          if (tag[0] === 'r') {
-            const url = new URL(tag[1]).toString();
-            console.log('url', url);
-            // const readPermission = tag[2] !== 'write'; // If not explicitly write-only
-            
-            // if (readPermission && url) {
-            if(url) {
-              _userRelays.push(normalizeRelayUrl(url));
-            }
-            console.log('userRelays', userRelays);
+          if (readPermission && url) {
+            userRelays.push(normalizeRelayUrl(url));
           }
         }
-        userRelays.set(_userRelays);
       }
+      
+      debugLog('Extracted relays:', userRelays);
+    } else {
+      debugLog('No kind:10002 events found');
     }
-  )
-  // if ($userRelays.length === 0) {
-  //   debugLog('Using discovery relays as fallback');
-  //   $userRelays = [...get(foundRelays)];
-  // }
+  } catch (error) {
+    debugError('Error fetching user relays:', error);
+  }
+  
+  // If we couldn't find any relays, use the discovery relays as fallback
+  if (userRelays.length === 0) {
+    debugLog('Using discovery relays as fallback');
+    userRelays = [...get(foundRelays)];
+  }
 }
 
 // Fetch recent notes from user's relays
 async function fetchRecentNotes(limit: number = 20) {
-  if ($userRelays.length === 0) return;
+  if (userRelays.length === 0) return;
   
   loadingNotes = true;
   recentNotes = [];
@@ -997,15 +995,10 @@ async function fetchRecentNotes(limit: number = 20) {
       url?: string; // URL property that comes from the relay
     };
     
-    // Subscribe to recent events from user relays
+    // Subscribe to recent events from all relays
     const sub = pool.subscribeMany(
-      $userRelays,
-      [
-        { 
-          limit: limit,
-          authors: [currentPubkey]
-        }
-      ],
+      userRelays,
+      [{ kinds: [1], limit: limit }],
       {
         onevent(event) {
           // Add to notes if not already there
@@ -1045,7 +1038,7 @@ async function fetchRecentNotes(limit: number = 20) {
 
 // Check relay availability for a specific note
 async function checkNoteRelays(noteId: string) {
-  if (!noteId || $userRelays.length === 0) return;
+  if (!noteId || userRelays.length === 0) return;
   
   // Reset search state
   foundOnRelays.set(new Set());
@@ -1090,7 +1083,7 @@ let noteFetchCount = 20; // Default number of notes to fetch
 
 // Function to fetch notes and then check them all in batches
 async function fetchAndCheckNotes(limit: number = 20) {
-  if ($userRelays.length === 0) return;
+  if (userRelays.length === 0) return;
   
   loadingNotes = true;
   recentNotes = [];
@@ -1113,7 +1106,7 @@ async function fetchAndCheckNotes(limit: number = 20) {
 
 // Check all notes in batches of 10
 async function checkAllNotesInBatches() {
-  if (recentNotes.length === 0 || $userRelays.length === 0) return;
+  if (recentNotes.length === 0 || userRelays.length === 0) return;
   
   const BATCH_SIZE = 10;
   const batchCount = Math.ceil(recentNotes.length / BATCH_SIZE);
@@ -1135,6 +1128,23 @@ async function checkAllNotesInBatches() {
   }
 }
 
+// Update the Mode Switcher Tabs to disable them during active searches
+<div class="flex mb-6 border-b dark:border-gray-700">
+  <button
+    class="px-4 py-2 font-medium {activeMode === 1 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400' : 'text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400'} disabled:opacity-50 disabled:cursor-not-allowed"
+    on:click={() => switchMode(1)}
+    disabled={isSearching || loadingNotes}
+  >
+    Find Note by ID
+  </button>
+  <button
+    class="px-4 py-2 font-medium {activeMode === 2 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400' : 'text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400'} disabled:opacity-50 disabled:cursor-not-allowed"
+    on:click={() => switchMode(2)}
+    disabled={isSearching || loadingNotes}
+  >
+    Check Your Notes
+  </button>
+</div>
 </script>
 
 <div class="min-h-screen w-full bg-white dark:bg-gray-900">
@@ -1673,9 +1683,9 @@ async function checkAllNotesInBatches() {
               </button>
             </div>
             <div class="mt-4">
-              <span class="text-blue-800 dark:text-blue-300 font-semibold">Your Relays ({$userRelays.length}):</span>
+              <span class="text-blue-800 dark:text-blue-300 font-semibold">Your Relays ({userRelays.length}):</span>
               <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-1">
-                {#each $userRelays as relay}
+                {#each userRelays as relay}
                   <div class="text-xs font-mono truncate bg-blue-100 dark:bg-blue-900/30 p-1.5 rounded">
                     {relay}
                   </div>
@@ -1700,7 +1710,7 @@ async function checkAllNotesInBatches() {
             <button
               class="flex-none p-3 bg-green-500 hover:bg-green-600 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               on:click={() => fetchAndCheckNotes(noteFetchCount)}
-              disabled={loadingNotes || $userRelays.length === 0 || isSearching}
+              disabled={loadingNotes || userRelays.length === 0 || isSearching}
             >
               {loadingNotes ? 'Loading...' : 'Fetch & Check Notes'}
             </button>
