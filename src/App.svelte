@@ -896,6 +896,9 @@ let isCurrentlyChecking = false;
 let rebroadcastingNoteId: string | null = null;
 let isRebroadcastingAll = false;
 let rebroadcastResults: Map<string, { success: Set<string>, failed: Set<string> }> = new Map();
+let showPubkeyInput = false;
+let pubkeyInputValue = '';
+let pubkeyInputError = '';
 
 // Check if NIP-07 extension is available
 function hasNip07Extension(): boolean {
@@ -1043,7 +1046,12 @@ async function rebroadcastSingleNote(note: Event) {
     
     // Combine previous relay data with newly found relays
     const updatedRelays = new Set([...existingRelays, ...get(foundOnRelays)]);
+    
+    // Update noteRelayMap and force reactivity by creating a new Map
     noteRelayMap.set(note.id, updatedRelays);
+    
+    // Force UI update by triggering reactivity
+    noteRelayMap = new Map(noteRelayMap);
     
     // Clean up
     isCurrentlyChecking = false;
@@ -1058,6 +1066,7 @@ async function rebroadcastAllNotes() {
   if (recentNotes.length === 0) return;
   
   isRebroadcastingAll = true;
+  let notesWithMissingRelays = 0;
   
   try {
     // Clear previous results
@@ -1078,9 +1087,12 @@ async function rebroadcastAllNotes() {
       );
       
       if (missingRelays.length === 0) {
-        debugLog(`Note ${note.id} already present on all relays`);
+        debugLog(`Note ${note.id} already present on all relays, skipping`);
         continue;
       }
+      
+      notesWithMissingRelays++;
+      debugLog(`Note ${note.id} missing from ${missingRelays.length}/${$userRelays.length} relays`);
       
       // Rebroadcast to missing relays
       await rebroadcastNote(note, missingRelays);
@@ -1094,10 +1106,18 @@ async function rebroadcastAllNotes() {
       await playSuccessSound();
     }
     
+    if (notesWithMissingRelays === 0) {
+      debugLog('No notes needed rebroadcasting, all notes are on all relays');
+      return;
+    }
+    
     // Restore saved relay mappings
     for (const [noteId, relays] of savedRelayMaps.entries()) {
       noteRelayMap.set(noteId, relays);
     }
+    
+    // Force reactivity update
+    noteRelayMap = new Map(noteRelayMap);
     
     // Rescan all notes to update their status
     debugLog(`Rescanning all notes after rebroadcast`);
@@ -1108,12 +1128,22 @@ async function rebroadcastAllNotes() {
       // Skip if we don't have this note in the map
       if (!noteRelayMap.has(note.id)) continue;
       
+      // Get current relays for this note
+      const currentRelays = noteRelayMap.get(note.id) || new Set();
+      
+      // Skip if note is already on all relays
+      if (currentRelays.size === $userRelays.length) {
+        debugLog(`Note ${note.id} already on all relays after rebroadcast, skipping check`);
+        totalNotesChecked++;
+        continue;
+      }
+      
       // Set current note as being checked
       currentlyCheckingNoteId = note.id;
       isCurrentlyChecking = true;
       
       // Reset search state but start with existing data
-      foundOnRelays.set(new Set(noteRelayMap.get(note.id)));
+      foundOnRelays.set(new Set(currentRelays));
       checkedRelays.set(new Set());
       
       // Check all relays for this note
@@ -1123,12 +1153,15 @@ async function rebroadcastAllNotes() {
         relays: $userRelays
       };
       
-      // Check all relays
+      // Only check relays where this note is missing
       await checkNoteOnRelays(note.id, $userRelays);
       
       // Update the note relay map
-      const updatedRelays = new Set([...noteRelayMap.get(note.id) || [], ...get(foundOnRelays)]);
+      const updatedRelays = new Set([...currentRelays, ...get(foundOnRelays)]);
       noteRelayMap.set(note.id, updatedRelays);
+      
+      // Force update for this note's relays
+      noteRelayMap = new Map(noteRelayMap);
       
       // Increment checked notes
       totalNotesChecked++;
@@ -1147,6 +1180,9 @@ async function rebroadcastAllNotes() {
     rebroadcastingNoteId = null;
     isCurrentlyChecking = false;
     currentlyCheckingNoteId = null;
+    
+    // Final reactivity update
+    noteRelayMap = new Map(noteRelayMap);
   }
 }
 
@@ -1180,6 +1216,52 @@ async function loginWithExtension() {
     }
   } catch (error) {
     debugError('Error logging in with extension:', error);
+    loggedIn = false;
+  }
+}
+
+// Login with manually entered pubkey
+function loginWithPubkey() {
+  if (!pubkeyInputValue) {
+    pubkeyInputError = 'Please enter a pubkey';
+    return;
+  }
+  
+  try {
+    // Check if it's a hex pubkey (64 chars)
+    if (/^[0-9a-fA-F]{64}$/.test(pubkeyInputValue)) {
+      currentPubkey = pubkeyInputValue.toLowerCase();
+    } 
+    // Check if it's a NIP-19 format (npub or nprofile)
+    else if (pubkeyInputValue.startsWith('npub1') || pubkeyInputValue.startsWith('nprofile1')) {
+      const decoded = nip19.decode(pubkeyInputValue);
+      if (decoded.type === 'npub') {
+        currentPubkey = decoded.data;
+      } else if (decoded.type === 'nprofile') {
+        currentPubkey = decoded.data.pubkey;
+      } else {
+        throw new Error('Unsupported NIP-19 format');
+      }
+    } 
+    else {
+      throw new Error('Invalid pubkey format');
+    }
+    
+    // Set login state and fetch relays
+    loggedIn = !!currentPubkey;
+    
+    if (loggedIn) {
+      // Reset the input field and hide it
+      pubkeyInputValue = '';
+      showPubkeyInput = false;
+      pubkeyInputError = '';
+      
+      // Fetch user's NIP-65 relays
+      fetchUserRelays();
+    }
+  } catch (error) {
+    debugError('Error processing pubkey:', error);
+    pubkeyInputError = 'Invalid pubkey format. Please enter a valid hex, npub, or nprofile.';
     loggedIn = false;
   }
 }
@@ -1360,9 +1442,19 @@ async function fetchRecentNotes(limit: number = 20) {
   }
 }
 
-// Check a specific note against a list of relays (similar to Mode 1 approach)
+// Check a specific note against a list of relays
 async function checkNoteOnRelays(noteId: string, relayUrls: string[]) {
-  debugLog(`Checking note ${noteId} on ${relayUrls.length} relays`);
+  // Get only the relays where the note is not found
+  const currentRelays = noteRelayMap.get(noteId) || new Set();
+  const missingRelays = relayUrls.filter(relay => !currentRelays.has(relay));
+  
+  // If no missing relays, no need to check
+  if (missingRelays.length === 0) {
+    debugLog(`Note ${noteId} already found on all relays, skipping checks`);
+    return;
+  }
+  
+  debugLog(`Checking note ${noteId} on ${missingRelays.length}/${relayUrls.length} relays (${relayUrls.length - missingRelays.length} already known)`);
   
   // Clean up any existing connections first
   await cleanupActiveConnections();
@@ -1373,7 +1465,7 @@ async function checkNoteOnRelays(noteId: string, relayUrls: string[]) {
   // Process relays in batches to avoid overwhelming the browser
   const MAX_CONCURRENT = Math.min(MAX_CONCURRENT_RELAYS, 20); // Ensure no more than 20 concurrent relays
   
-  for (let i = 0; i < relayUrls.length && isSearching; i += MAX_CONCURRENT) {
+  for (let i = 0; i < missingRelays.length && isSearching; i += MAX_CONCURRENT) {
     if (isPaused) {
       await new Promise(resolve => {
         const checkPause = setInterval(() => {
@@ -1388,7 +1480,7 @@ async function checkNoteOnRelays(noteId: string, relayUrls: string[]) {
     if (!isSearching) break;
 
     // Get the current batch of relays
-    const currentBatch = relayUrls.slice(i, i + MAX_CONCURRENT);
+    const currentBatch = missingRelays.slice(i, i + MAX_CONCURRENT);
     debugLog(`Processing relay batch for note ${noteId}: ${currentBatch.length} relays`);
     
     // Track if we've found a relay in this batch (for sound effects)
@@ -1447,6 +1539,9 @@ async function checkNoteOnRelays(noteId: string, relayUrls: string[]) {
                 noteRelayMap.set(noteId, new Set());
               }
               noteRelayMap.get(noteId)?.add(relayUrl);
+              
+              // Force reactivity by creating a new Map
+              noteRelayMap = new Map(noteRelayMap);
               
               // Play click sound when a relay is found
               if (soundEnabled && !foundRelayInCurrentBatch) {
@@ -1508,6 +1603,147 @@ async function checkNoteOnRelays(noteId: string, relayUrls: string[]) {
     // Add a small delay between batches
     await new Promise(resolve => setTimeout(resolve, 100));
   }
+  
+  // Also mark already known relays as checked
+  checkedRelays.update(relays => {
+    for (const relay of currentRelays) {
+      relays.add(relay);
+    }
+    return relays;
+  });
+  
+  // Force UI reactivity update at the end to ensure counts update
+  noteRelayMap = new Map(noteRelayMap);
+}
+
+// Check all notes in batches
+async function checkAllNotesInBatches() {
+  if (recentNotes.length === 0 || $userRelays.length === 0) return;
+  
+  const BATCH_SIZE = 1; // Process 1 note at a time for better UX
+  const batchCount = Math.ceil(recentNotes.length / BATCH_SIZE);
+  
+  isSearching = true;
+  searchStartTime = Date.now();
+  
+  try {
+    for (let batchIndex = 0; batchIndex < batchCount && isSearching; batchIndex++) {
+      // Get the current batch of notes
+      const noteBatch = recentNotes.slice(batchIndex * BATCH_SIZE, (batchIndex + 1) * BATCH_SIZE);
+      
+      // Process each note in the batch
+      for (const note of noteBatch) {
+        if (!isSearching) break;
+        
+        debugLog(`Processing note ${note.id}`);
+        
+        // Check if note is already on all relays
+        const currentRelays = noteRelayMap.get(note.id) || new Set();
+        if (currentRelays.size === $userRelays.length) {
+          debugLog(`Note ${note.id} already on all relays (${currentRelays.size}/${$userRelays.length}), skipping`);
+          // Still increment counter to maintain progress
+          totalNotesChecked++;
+          continue;
+        }
+        
+        // Check if there are any relays to check
+        const missingRelayCount = $userRelays.length - currentRelays.size;
+        if (missingRelayCount === 0) {
+          debugLog(`No relays to check for note ${note.id}`);
+          totalNotesChecked++;
+          continue;
+        }
+        
+        // Set current note as being checked and expand it
+        currentlyCheckingNoteId = note.id;
+        isCurrentlyChecking = true;
+        note.expanded = true;
+        
+        // Play the radar sound when starting to check a new note
+        if (soundEnabled) {
+          await playRadarSound();
+        }
+        
+        // Set up the target event for this note
+        targetEvent = {
+          type: 'hex',
+          id: note.id,
+          relays: $userRelays
+        };
+        
+        // Reset state for this note
+        foundOnRelays.set(new Set(currentRelays)); // Start with already known relays
+        checkedRelays.set(new Set());
+        
+        // Only check relays where the note is missing
+        await checkNoteOnRelays(note.id, $userRelays);
+        
+        // Ensure noteRelayMap is correctly updated from foundOnRelays
+        noteRelayMap.set(note.id, new Set(get(foundOnRelays)));
+        
+        // Force reactivity update after each note
+        noteRelayMap = new Map(noteRelayMap);
+        
+        // Increment the number of checked notes
+        totalNotesChecked++;
+        
+        // Play success sound if note was found on all relays, otherwise play partial success sound
+        if (soundEnabled) {
+          const foundRelaysCount = get(foundOnRelays).size;
+          if (foundRelaysCount === $userRelays.length) {
+            await playSuccessSound();
+          } else if (foundRelaysCount > 0) {
+            await playFoundSound();
+          } else {
+            await playFailureSound();
+          }
+        }
+        
+        // Keep note expanded for a moment so user can see the results
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Collapse the note if not the last one
+        if (batchIndex < batchCount - 1) {
+          note.expanded = false;
+        }
+        
+        isCurrentlyChecking = false;
+      }
+    }
+  } catch (error) {
+    debugError('Error checking notes in batches:', error);
+  } finally {
+    isSearching = false;
+    searchCompleted = true;
+    searchDuration = (Date.now() - searchStartTime) / 1000;
+    currentlyCheckingNoteId = null;
+    isCurrentlyChecking = false;
+    
+    // Final reactivity update to ensure UI is in sync
+    noteRelayMap = new Map(noteRelayMap);
+  }
+}
+
+$: MODE = activeMode;
+
+// Logout function to reset login state
+function logout() {
+  loggedIn = false;
+  currentPubkey = '';
+  userRelays.set([]);
+  recentNotes = [];
+  noteRelayMap.clear();
+  totalNotesChecked = 0;
+  
+  // Clear any active subscriptions
+  for (const sub of noteSubscriptions) {
+    try {
+      sub.close();
+    } catch (error) {
+      debugLog('Error closing subscription:', error);
+    }
+  }
+  noteSubscriptions = [];
 }
 
 // Switch between modes
@@ -1565,93 +1801,6 @@ async function fetchAndCheckNotes(limit: number = 20) {
     isCurrentlyChecking = false;
   }
 }
-
-// Check all notes in batches of 5
-async function checkAllNotesInBatches() {
-  if (recentNotes.length === 0 || $userRelays.length === 0) return;
-  
-  const BATCH_SIZE = 1; // Process 1 note at a time for better UX
-  const batchCount = Math.ceil(recentNotes.length / BATCH_SIZE);
-  
-  isSearching = true;
-  searchStartTime = Date.now();
-  
-  try {
-    for (let batchIndex = 0; batchIndex < batchCount && isSearching; batchIndex++) {
-      // Get the current batch of notes
-      const noteBatch = recentNotes.slice(batchIndex * BATCH_SIZE, (batchIndex + 1) * BATCH_SIZE);
-      
-      // Process each note in the batch
-      for (const note of noteBatch) {
-        if (!isSearching) break;
-        
-        debugLog(`Processing note ${note.id}`);
-        
-        // Set current note as being checked and expand it
-        currentlyCheckingNoteId = note.id;
-        isCurrentlyChecking = true;
-        note.expanded = true;
-        
-        // Play the radar sound when starting to check a new note
-        if (soundEnabled) {
-          await playRadarSound();
-        }
-        
-        // Set up the target event for this note
-        targetEvent = {
-          type: 'hex',
-          id: note.id,
-          relays: $userRelays
-        };
-        
-        // Reset state for this note
-        foundOnRelays.set(new Set());
-        checkedRelays.set(new Set());
-        
-        // Check all relays for this note individually (similar to findEventOnRelays but targeted)
-        await checkNoteOnRelays(note.id, $userRelays);
-        
-        // Ensure noteRelayMap is correctly updated from foundOnRelays
-        noteRelayMap.set(note.id, new Set(get(foundOnRelays)));
-        
-        // Increment the number of checked notes
-        totalNotesChecked++;
-        
-        // Play success sound if note was found on all relays, otherwise play partial success sound
-        if (soundEnabled) {
-          const foundRelaysCount = get(foundOnRelays).size;
-          if (foundRelaysCount === $userRelays.length) {
-            await playSuccessSound();
-          } else if (foundRelaysCount > 0) {
-            await playFoundSound();
-          } else {
-            await playFailureSound();
-          }
-        }
-        
-        // Keep note expanded for a moment so user can see the results
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Collapse the note if not the last one
-        if (batchIndex < batchCount - 1) {
-          note.expanded = false;
-        }
-        
-        isCurrentlyChecking = false;
-      }
-    }
-  } catch (error) {
-    debugError('Error checking notes in batches:', error);
-  } finally {
-    isSearching = false;
-    searchCompleted = true;
-    searchDuration = (Date.now() - searchStartTime) / 1000;
-    currentlyCheckingNoteId = null;
-    isCurrentlyChecking = false;
-  }
-}
-
-$: MODE = activeMode;
 
 </script>
 
@@ -1926,7 +2075,7 @@ $: MODE = activeMode;
       <a href="https://njump.me/npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx" target="_blank" class="border-b border-gray-700">sandwich</a> 
       of the <a href="https://nadar.tigerville.no/" target="_blank" class="border-b border-gray-700">original NADAR</a> by 
       <a href="https://njump.me/npub16ema6x3r8x8pe32lwnsll0krqmy79h5vvap8sdd7q5yhy4q2dv6slt6le9" target="_blank" class="border-b border-gray-700">Thorwegian</a>.
-    </p>
+          </p>
   </div>
 
   <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4 rounded-lg p-4">
@@ -1954,28 +2103,28 @@ $: MODE = activeMode;
 
   <!-- MODE 1: Find Note by ID -->
   {#if activeMode === 1}
-    <div class="mb-4 relative">
-      <input
-        type="text"
-        placeholder={loading ? "Please wait while relays are being loaded..." : "Enter nevent, naddr, or hex event ID"}
-        class="p-2 border rounded w-full dark:bg-gray-800 dark:border-gray-700 dark:text-white {inputError ? 'border-red-500' : ''}"
-        on:keydown={handleInput}
-        disabled={isSearching || loading}
-        value={inputValue}
-      />
-      <button
-        class="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-full backdrop-blur-sm bg-white/70 dark:bg-gray-800/70 text-gray-600 hover:text-gray-800 hover:bg-white/90 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-gray-800/90 transition-all"
-        title="Preferences"
-        on:click={() => showPreferences = !showPreferences}>
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" />
-          <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-        </svg>
-      </button>
-      {#if inputError}
-        <p class="text-red-500 text-sm mt-1">{inputError}</p>
-      {/if}
-    </div>
+  <div class="mb-4 relative">
+    <input
+      type="text"
+      placeholder={loading ? "Please wait while relays are being loaded..." : "Enter nevent, naddr, or hex event ID"}
+      class="p-2 border rounded w-full dark:bg-gray-800 dark:border-gray-700 dark:text-white {inputError ? 'border-red-500' : ''}"
+      on:keydown={handleInput}
+      disabled={isSearching || loading}
+      value={inputValue}
+    />
+    <button
+      class="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-full backdrop-blur-sm bg-white/70 dark:bg-gray-800/70 text-gray-600 hover:text-gray-800 hover:bg-white/90 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-gray-800/90 transition-all"
+      title="Preferences"
+      on:click={() => showPreferences = !showPreferences}>
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" />
+        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+      </svg>
+    </button>
+    {#if inputError}
+      <p class="text-red-500 text-sm mt-1">{inputError}</p>
+    {/if}
+  </div>
 
     <div class="bg-gray-800/10 dark:bg-gray-700/10 mb-4 rounded-lg p-4">
       <p class="text-gray-700 dark:text-gray-300">
@@ -1988,173 +2137,173 @@ $: MODE = activeMode;
       </p>
     </div>
 
-    {#if targetEvent}
-      {#if searchCompleted}
-        <div class="mb-4">
-          <div class="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4 mb-4">
-            <div class="flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-green-600 dark:text-green-400">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <h2 class="text-xl font-semibold text-green-800 dark:text-green-400">Search Complete!</h2>
-            </div>
-            <div class="mt-2 text-green-700 dark:text-green-300">
-              Search completed in {searchDuration.toFixed(1)} seconds
-            </div>
-          </div>
-
-          <h2 class="text-xl font-semibold mb-2">Search Results:</h2>
-          <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 space-y-2">
-            <div class="grid grid-cols-2 gap-4">
-              <div>
-                <span class="text-gray-600 dark:text-gray-400">Total Relays Searched:</span>
-                <span class="ml-2 font-semibold">{$checkedRelays.size}</span>
-              </div>
-              <div>
-                <span class="text-gray-600 dark:text-gray-400">Found On:</span>
-                <span class="ml-2 font-semibold">{$foundOnRelays.size} relays</span>
-              </div>
-              <div>
-                <span class="text-gray-600 dark:text-gray-400">Success Rate:</span>
-                <span class="ml-2 font-semibold">
-                  {($foundOnRelays.size / $checkedRelays.size * 100).toFixed(1)}%
-                </span>
-              </div>
-              <div>
-                <span class="text-gray-600 dark:text-gray-400">Time Taken:</span>
-                <span class="ml-2 font-semibold">{searchDuration.toFixed(1)}s</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      {/if}
-
-      {#if isSearching}
-        <div class="mb-4">
-          <h2 class="text-xl font-semibold mb-2">Search Progress:</h2>
-          <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 space-y-2">
-            <div class="grid grid-cols-2 gap-2">
-              <div>
-                <span class="text-gray-600 dark:text-gray-400">Total Relays:</span>
-                <span class="ml-2">{$foundRelays.size}</span>
-              </div>
-              <div>
-                <span class="text-gray-600 dark:text-gray-400">Checked Relays:</span>
-                <span class="ml-2">{$checkedRelays.size}</span>
-              </div>
-              <div>
-                <span class="text-gray-600 dark:text-gray-400">Found On:</span>
-                <span class="ml-2">{$foundOnRelays.size}</span>
-              </div>
-              <div>
-                <span class="text-gray-600 dark:text-gray-400">Remaining:</span>
-                <span class="ml-2">{$foundRelays.size - $checkedRelays.size}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      {/if}
-
+  {#if targetEvent}
+    {#if searchCompleted}
       <div class="mb-4">
-        <h2 class="text-xl font-semibold mb-2">Search Details:</h2>
+        <div class="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4 mb-4">
+          <div class="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-green-600 dark:text-green-400">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <h2 class="text-xl font-semibold text-green-800 dark:text-green-400">Search Complete!</h2>
+          </div>
+          <div class="mt-2 text-green-700 dark:text-green-300">
+            Search completed in {searchDuration.toFixed(1)} seconds
+          </div>
+        </div>
+
+        <h2 class="text-xl font-semibold mb-2">Search Results:</h2>
         <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 space-y-2">
+          <div class="grid grid-cols-2 gap-4">
             <div>
-              <span class="text-gray-600 dark:text-gray-400">Type:</span>
-              <span class="font-mono ml-2">{targetEvent.type}</span>
+              <span class="text-gray-600 dark:text-gray-400">Total Relays Searched:</span>
+              <span class="ml-2 font-semibold">{$checkedRelays.size}</span>
             </div>
-            <div class="flex items-center">
-              <span class="text-gray-600 dark:text-gray-400">ID:</span>
-              <span class="font-mono ml-2 text-sm break-all flex-1">{targetEvent.id}</span>
-              {#if targetEvent.id}
-              <button
-                class="ml-2 p-1.5 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700"
-                title="Copy ID"
-                on:click={() => {
-                  if (targetEvent?.id) {
-                    navigator.clipboard.writeText(targetEvent.id);
-                  }
-                }}>
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" />
-                </svg>
-              </button>
-              {/if}
+            <div>
+              <span class="text-gray-600 dark:text-gray-400">Found On:</span>
+              <span class="ml-2 font-semibold">{$foundOnRelays.size} relays</span>
             </div>
-            {#if targetEvent.pubkey}
-              <div>
-                <span class="text-gray-600 dark:text-gray-400">Pubkey:</span>
-                <span class="font-mono ml-2 text-sm break-all">{targetEvent.pubkey}</span>
-              </div>
-            {/if}
-            {#if targetEvent.type !== 'hex'}
-              <div>
-                <span class="text-gray-600 dark:text-gray-400">Relays from NIP-19:</span>
-                <span class="ml-2">{targetEvent.relays?.length || 0}</span>
-              </div>
-            {/if}
-        </div>
-      </div>
-
-      {#if !searchCompleted}
-      <div class="flex gap-2 my-4">
-        <button
-          class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700"
-          on:click={togglePause}
-          disabled={!isSearching}
-        >
-          {isPaused ? 'Resume' : 'Pause'}
-        </button>
-        <button
-          class="px-4 py-2 text-sm bg-red-500 text-white rounded hover:bg-red-600 disabled:opacity-50"
-          on:click={restartSearch}
-          disabled={!isSearching}
-        >
-          Restart
-        </button>
-      </div>
-      {/if}
-      
-      <div class="mb-4">
-        {#if !searchCompleted}
-        <h2 class="text-xl font-semibold mb-2">Searching for event:</h2>
-        <p class="font-mono text-sm">{targetEvent.id}</p>
-        {/if}
-        
-        {#if !searchCompleted && currentBatch.length > 0}
-          <div class="mt-4">
-            <div class="flex items-center gap-2 mb-2">
-              <div class="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
-                <div 
-                  class="h-full bg-blue-500 transition-all duration-300"
-                  style="width: {(currentBatchIndex / totalBatches) * 100}%"
-                ></div>
-              </div>
-              <span class="text-sm text-gray-600">Batch {currentBatchIndex}/{totalBatches}</span>
+            <div>
+              <span class="text-gray-600 dark:text-gray-400">Success Rate:</span>
+              <span class="ml-2 font-semibold">
+                {($foundOnRelays.size / $checkedRelays.size * 100).toFixed(1)}%
+              </span>
             </div>
-            <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
-              {#each currentBatch as relay}
-                <div class="p-1.5 rounded text-xs font-mono truncate hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-1
-                  {$foundOnRelays.has(relay) 
-                    ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400' 
-                    : $checkedRelays.has(relay) 
-                      ? 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400' 
-                      : 'bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300'}">
-                  <span class="w-1.5 h-1.5 rounded-full 
-                    {$foundOnRelays.has(relay) && targetEvent.relays?.includes(relay) ? 'bg-green-500' : ''}
-                    {!$foundOnRelays.has(relay) && targetEvent.relays?.includes(relay) ? 'bg-red-500' : ''}
-                    "></span>
-                  {relay}
-                </div>
-              {/each}
+            <div>
+              <span class="text-gray-600 dark:text-gray-400">Time Taken:</span>
+              <span class="ml-2 font-semibold">{searchDuration.toFixed(1)}s</span>
             </div>
           </div>
-        {/if}
+        </div>
       </div>
     {/if}
+
+    {#if isSearching}
+      <div class="mb-4">
+        <h2 class="text-xl font-semibold mb-2">Search Progress:</h2>
+        <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 space-y-2">
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <span class="text-gray-600 dark:text-gray-400">Total Relays:</span>
+              <span class="ml-2">{$foundRelays.size}</span>
+            </div>
+            <div>
+              <span class="text-gray-600 dark:text-gray-400">Checked Relays:</span>
+              <span class="ml-2">{$checkedRelays.size}</span>
+            </div>
+            <div>
+              <span class="text-gray-600 dark:text-gray-400">Found On:</span>
+              <span class="ml-2">{$foundOnRelays.size}</span>
+            </div>
+            <div>
+              <span class="text-gray-600 dark:text-gray-400">Remaining:</span>
+              <span class="ml-2">{$foundRelays.size - $checkedRelays.size}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    <div class="mb-4">
+      <h2 class="text-xl font-semibold mb-2">Search Details:</h2>
+      <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 space-y-2">
+          <div>
+            <span class="text-gray-600 dark:text-gray-400">Type:</span>
+            <span class="font-mono ml-2">{targetEvent.type}</span>
+          </div>
+          <div class="flex items-center">
+            <span class="text-gray-600 dark:text-gray-400">ID:</span>
+            <span class="font-mono ml-2 text-sm break-all flex-1">{targetEvent.id}</span>
+            {#if targetEvent.id}
+            <button
+              class="ml-2 p-1.5 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700"
+              title="Copy ID"
+              on:click={() => {
+                if (targetEvent?.id) {
+                  navigator.clipboard.writeText(targetEvent.id);
+                }
+              }}>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" />
+              </svg>
+            </button>
+            {/if}
+          </div>
+          {#if targetEvent.pubkey}
+            <div>
+              <span class="text-gray-600 dark:text-gray-400">Pubkey:</span>
+              <span class="font-mono ml-2 text-sm break-all">{targetEvent.pubkey}</span>
+            </div>
+          {/if}
+          {#if targetEvent.type !== 'hex'}
+            <div>
+              <span class="text-gray-600 dark:text-gray-400">Relays from NIP-19:</span>
+              <span class="ml-2">{targetEvent.relays?.length || 0}</span>
+            </div>
+          {/if}
+      </div>
+    </div>
+
+    {#if !searchCompleted}
+    <div class="flex gap-2 my-4">
+      <button
+        class="px-4 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700"
+        on:click={togglePause}
+        disabled={!isSearching}
+      >
+        {isPaused ? 'Resume' : 'Pause'}
+      </button>
+      <button
+        class="px-4 py-2 text-sm bg-red-500 text-white rounded hover:bg-red-600 disabled:opacity-50"
+        on:click={restartSearch}
+        disabled={!isSearching}
+      >
+        Restart
+      </button>
+    </div>
+    {/if}
+    
+    <div class="mb-4">
+      {#if !searchCompleted}
+      <h2 class="text-xl font-semibold mb-2">Searching for event:</h2>
+      <p class="font-mono text-sm">{targetEvent.id}</p>
+      {/if}
+      
+      {#if !searchCompleted && currentBatch.length > 0}
+        <div class="mt-4">
+          <div class="flex items-center gap-2 mb-2">
+            <div class="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+              <div 
+                class="h-full bg-blue-500 transition-all duration-300"
+                style="width: {(currentBatchIndex / totalBatches) * 100}%"
+              ></div>
+            </div>
+            <span class="text-sm text-gray-600">Batch {currentBatchIndex}/{totalBatches}</span>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1">
+            {#each currentBatch as relay}
+              <div class="p-1.5 rounded text-xs font-mono truncate hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-1
+                {$foundOnRelays.has(relay) 
+                  ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400' 
+                  : $checkedRelays.has(relay) 
+                    ? 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400' 
+                    : 'bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300'}">
+                <span class="w-1.5 h-1.5 rounded-full 
+                  {$foundOnRelays.has(relay) && targetEvent.relays?.includes(relay) ? 'bg-green-500' : ''}
+                  {!$foundOnRelays.has(relay) && targetEvent.relays?.includes(relay) ? 'bg-red-500' : ''}
+                  "></span>
+                {relay}
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
   {:else if activeMode === 2}
     <!-- MODE 2: Check Your Notes -->
     <div class="mb-4">
-      {#if !hasNip07Extension()}
+      {#if !hasNip07Extension() && !loggedIn}
         <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-4">
           <div class="flex items-center gap-2">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-yellow-600 dark:text-yellow-400">
@@ -2169,31 +2318,83 @@ $: MODE = activeMode;
           </div>
         </div>
       {:else if !loggedIn}
-        <button
-          class="w-full p-4 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium flex items-center justify-center gap-2"
-          on:click={loginWithExtension}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
-          </svg>
-          Login with Extension
-        </button>
+        <!-- Login Options -->
+        <div class="space-y-3">
+          <button
+            class="w-full p-4 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium flex items-center justify-center gap-2"
+            on:click={loginWithExtension}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+            </svg>
+            Login with Extension
+          </button>
+          
+          <!-- Enter Pubkey Button -->
+          <button
+            class="w-full p-4 bg-gray-500 hover:bg-gray-600 text-white rounded-lg font-medium flex items-center justify-center gap-2"
+            on:click={() => showPubkeyInput = !showPubkeyInput}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+            </svg>
+            Enter Pubkey Manually
+          </button>
+          
+          <!-- Pubkey Input Field (shown when showPubkeyInput is true) -->
+          {#if showPubkeyInput}
+            <div class="mt-3 p-4 bg-gray-100 dark:bg-gray-800 rounded-lg">
+              <label for="pubkeyInput" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                Enter hex pubkey, npub, or nprofile:
+              </label>
+              <div class="flex gap-2">
+                <input 
+                  id="pubkeyInput"
+                  type="text" 
+                  bind:value={pubkeyInputValue} 
+                  placeholder="hex, npub1..., or nprofile1..."
+                  class="flex-1 p-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 dark:text-white {pubkeyInputError ? 'border-red-500' : ''}"
+                />
+                <button 
+                  class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-md"
+                  on:click={loginWithPubkey}
+                >
+                  Login
+                </button>
+              </div>
+              {#if pubkeyInputError}
+                <p class="mt-1 text-sm text-red-600 dark:text-red-400">{pubkeyInputError}</p>
+              {/if}
+              <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                Accepted formats: 64-character hex, npub1... or nprofile1...
+              </p>
+            </div>
+          {/if}
+        </div>
       {:else}
         <!-- User Info & Controls -->
         <div class="bg-gray-800/10 dark:bg-gray-700/10 rounded-lg p-4 mb-4">
           <div class="flex items-center justify-between mb-3">
-            <div>
+            <div class="flex items-center">
               <span class="text-sm text-gray-700 dark:text-gray-300">Logged in as:</span>
               <span class="ml-2 font-mono text-sm text-gray-800 dark:text-gray-200">
                 {currentPubkey ? `${currentPubkey.substring(0, 8)}...${currentPubkey.substring(currentPubkey.length - 8)}` : 'Not logged in'}
               </span>
             </div>
-            <button
-              class="px-3 py-1 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded"
-              on:click={fetchUserRelays}
-            >
-              Refresh Relays
-            </button>
+            <div class="flex gap-2">
+              <button
+                class="px-3 py-1 text-sm bg-red-500 hover:bg-red-600 text-white rounded"
+                on:click={logout}
+              >
+                Logout
+              </button>
+              <button
+                class="px-3 py-1 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded"
+                on:click={fetchUserRelays}
+              >
+                Refresh Relays
+              </button>
+            </div>
           </div>
           
           <div class="flex justify-between items-center mb-3">
@@ -2532,7 +2733,7 @@ $: MODE = activeMode;
         <div class="flex items-center justify-between">
           <div class="font-medium text-blue-800 dark:text-blue-300">
             Note {totalNotesChecked}/{recentNotes.length}
-          </div>
+    </div>
           <div class="text-sm text-blue-700 dark:text-blue-400">
             {#if currentlyCheckingNoteId}
               Checking: {currentlyCheckingNoteId.substring(0, 8)}...
