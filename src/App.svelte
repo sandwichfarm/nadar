@@ -188,7 +188,7 @@ async function discoverRelays() {
 
     const eventIter = fetcher.allEventsIterator(
       DISCOVERY_RELAYS,
-      { kinds: [30166] },
+      { kinds: [30166], "#n": "clearnet" },
       { since: nHoursAgo(24) },
       { skipFilterMatching: true, skipVerification: true }
     );
